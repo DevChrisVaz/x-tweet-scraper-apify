@@ -125,11 +125,135 @@ function stringAt(value: unknown, key: string): string | undefined {
   return typeof record?.[key] === 'string' ? record[key] : undefined;
 }
 
+class JavaScriptLiteralParser {
+  private position: number;
+
+  public constructor(private readonly source: string, start: number) {
+    this.position = start;
+  }
+
+  public parse(): unknown {
+    const value = this.parseValue();
+    this.skipWhitespace();
+    return value;
+  }
+
+  private parseValue(): unknown {
+    this.skipWhitespace();
+    const character = this.peek();
+    if (character === '{') return this.parseObject();
+    if (character === '[') return this.parseArray();
+    if (character === '"' || character === "'") return this.parseString();
+    if (character === '-' || (character !== undefined && /\d/.test(character))) return this.parseNumber();
+    const identifier = this.parseIdentifier();
+    if (identifier === 'true') return true;
+    if (identifier === 'false') return false;
+    if (identifier === 'null') return null;
+    if (identifier === 'undefined') return undefined;
+    return identifier;
+  }
+
+  private parseObject(): JsonRecord {
+    this.expect('{');
+    const object: JsonRecord = {};
+    this.skipWhitespace();
+    while (this.peek() !== '}') {
+      const key = this.peek() === '"' || this.peek() === "'" ? this.parseString() : this.parseIdentifier();
+      if (key.length === 0) throw new Error('expected object key');
+      this.skipWhitespace();
+      this.expect(':');
+      object[key] = this.parseValue();
+      this.skipWhitespace();
+      if (this.peek() !== ',') break;
+      this.position += 1;
+      this.skipWhitespace();
+    }
+    this.expect('}');
+    return object;
+  }
+
+  private parseArray(): unknown[] {
+    this.expect('[');
+    const values: unknown[] = [];
+    this.skipWhitespace();
+    while (this.peek() !== ']') {
+      values.push(this.parseValue());
+      this.skipWhitespace();
+      if (this.peek() !== ',') break;
+      this.position += 1;
+      this.skipWhitespace();
+    }
+    this.expect(']');
+    return values;
+  }
+
+  private parseString(): string {
+    const quote = this.peek();
+    if (quote !== '"' && quote !== "'") throw new Error('expected string');
+    this.position += 1;
+    let value = '';
+    while (this.position < this.source.length) {
+      const character = this.source[this.position];
+      this.position += 1;
+      if (character === quote) return value;
+      if (character !== '\\') {
+        value += character;
+        continue;
+      }
+      const escaped = this.source[this.position];
+      this.position += 1;
+      if (escaped === 'u') {
+        const hex = this.source.slice(this.position, this.position + 4);
+        if (!/^[\da-f]{4}$/i.test(hex)) throw new Error('invalid unicode escape');
+        value += String.fromCharCode(Number.parseInt(hex, 16));
+        this.position += 4;
+      } else if (escaped === 'x') {
+        const hex = this.source.slice(this.position, this.position + 2);
+        if (!/^[\da-f]{2}$/i.test(hex)) throw new Error('invalid hexadecimal escape');
+        value += String.fromCharCode(Number.parseInt(hex, 16));
+        this.position += 2;
+      } else {
+        const escapes: Record<string, string> = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v', '\\': '\\', '"': '"', "'": "'", '/': '/' };
+        value += escaped === undefined ? '' : (escapes[escaped] ?? escaped);
+      }
+    }
+    throw new Error('unterminated string');
+  }
+
+  private parseNumber(): number {
+    const matched = this.source.slice(this.position).match(/^-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/i);
+    if (matched?.[0] === undefined) throw new Error('invalid number');
+    this.position += matched[0].length;
+    return Number(matched[0]);
+  }
+
+  private parseIdentifier(): string {
+    const matched = this.source.slice(this.position).match(/^[A-Za-z_$][\w$]*/);
+    if (matched?.[0] === undefined) throw new Error('expected literal');
+    this.position += matched[0].length;
+    return matched[0];
+  }
+
+  private skipWhitespace(): void {
+    while (this.peek() !== undefined && /\s/.test(this.peek() ?? '')) this.position += 1;
+  }
+
+  private peek(): string | undefined {
+    return this.source[this.position];
+  }
+
+  private expect(character: string): void {
+    this.skipWhitespace();
+    if (this.peek() !== character) throw new Error(`expected ${character}`);
+    this.position += 1;
+  }
+}
+
 function parseObjectLiteral(source: string, key: string): JsonRecord {
-  const matched = source.match(new RegExp(`(?:["']${key}["']|${key})\\s*[:=]\\s*({[^;]{0,20000}?})`, 's'));
-  if (matched?.[1] === undefined) return {};
+  const match = new RegExp(`(?:["']${key}["']|\\b${key}\\b)\\s*[:=]\\s*`).exec(source);
+  if (match === null) return {};
   try {
-    return JSON.parse(matched[1]) as JsonRecord;
+    return asRecord(new JavaScriptLiteralParser(source, match.index + match[0].length).parse()) ?? {};
   } catch {
     return {};
   }
@@ -214,7 +338,8 @@ function assetUrls(manifest: string, manifestUrl: string): string[] {
 }
 
 export class OperationRegistry {
-  private cached: DiscoverySnapshot | undefined;
+  private readonly cachedByBuild = new Map<string, DiscoverySnapshot>();
+  private latest: DiscoverySnapshot | undefined;
   private readonly fetcher: FetchLike;
   private readonly manifestUrl: string;
   private readonly bootstrap: OperationMap;
@@ -226,18 +351,25 @@ export class OperationRegistry {
   }
 
   public invalidate(): void {
-    this.cached = undefined;
+    this.cachedByBuild.clear();
+    this.latest = undefined;
   }
 
   public async get(forceRefresh = false): Promise<DiscoverySnapshot> {
-    if (!forceRefresh && this.cached !== undefined) return this.cached;
     let manifest: string;
     try {
       const manifestResponse = await this.fetcher(this.manifestUrl, { headers: { accept: 'application/javascript,text/javascript,*/*' } });
       if (!manifestResponse.ok) throw new Error(`manifest HTTP ${manifestResponse.status}`);
       manifest = await manifestResponse.text();
     } catch {
-      return { bearer: '', buildKey: null, bootstrapOperations: [...Object.keys(this.bootstrap)] as OperationName[], operations: { ...this.bootstrap }, features: {}, fieldToggles: {} };
+      return this.latest ?? { bearer: '', buildKey: null, bootstrapOperations: [...Object.keys(this.bootstrap)] as OperationName[], operations: { ...this.bootstrap }, features: {}, fieldToggles: {} };
+    }
+    const discoveredBuildKey = buildKey(manifest);
+    const cacheKey = discoveredBuildKey ?? `manifest:${fingerprint(manifest)}`;
+    const existing = this.cachedByBuild.get(cacheKey);
+    if (!forceRefresh && existing !== undefined) {
+      this.latest = existing;
+      return existing;
     }
     const sources = [manifest];
     for (const url of assetUrls(manifest, this.manifestUrl)) {
@@ -250,16 +382,27 @@ export class OperationRegistry {
     }
     const joined = sources.join('\n');
     const discovered = extractOperationPairs(joined);
-    this.cached = {
+    const snapshot: DiscoverySnapshot = {
       bearer: joined.match(/AAAA[A-Za-z0-9_%-]{20,}/)?.[0] ?? '',
-      buildKey: buildKey(manifest),
+      buildKey: discoveredBuildKey,
       bootstrapOperations: (Object.keys(this.bootstrap) as OperationName[]).filter((operation) => discovered[operation] === undefined),
       operations: { ...this.bootstrap, ...discovered },
       features: parseObjectLiteral(joined, 'features'),
       fieldToggles: parseObjectLiteral(joined, 'fieldToggles'),
     };
-    return this.cached;
+    this.cachedByBuild.set(cacheKey, snapshot);
+    this.latest = snapshot;
+    return snapshot;
   }
+}
+
+function fingerprint(value: string): string {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0).toString(16);
 }
 
 function cookieHeader(response: Response): string | undefined {
@@ -367,7 +510,7 @@ export class XGraphqlClient {
       }
       if (response.status === 401) throw new AccessDeniedError(401);
       if (response.status === 403) throw new AccessDeniedError(403);
-      const operationDrift = response.status === 404 || (response.status === 400 && await isQueryValidationResponse(response));
+      const operationDrift = response.status === 404 || (response.status === 400 && await isOperationDriftResponse(response));
       if (operationDrift && !driftRetried) {
         driftRetried = true;
         this.registry.invalidate();
@@ -395,12 +538,12 @@ export class XGraphqlClient {
       const record = asRecord(body);
       const error = graphQlError(record?.errors);
       if (error !== undefined) {
-        if (isQueryValidationError(error) && !driftRetried) {
+        if (isOperationDriftError(error) && !driftRetried) {
           driftRetried = true;
           this.registry.invalidate();
           continue;
         }
-        if (isQueryValidationError(error)) throw new OperationDriftError(operation);
+        if (isOperationDriftError(error)) throw new OperationDriftError(operation);
         if (isGuestAuthorizationError(error)) {
           if (unauthorizedRetried) throw new AccessDeniedError(401);
           unauthorizedRetried = true;
@@ -448,19 +591,23 @@ function graphQlError(value: unknown): string | undefined {
   return messages.join('; ');
 }
 
-function isQueryValidationError(message: string): boolean {
+function isOperationDriftError(message: string): boolean {
   const lower = message.toLowerCase();
-  return lower.includes('query') && (lower.includes('validation') || lower.includes('operation'));
+  return (lower.includes('query') && (lower.includes('validation') || lower.includes('operation')))
+    || lower.includes('persistedquerynotfound')
+    || (lower.includes('persisted') && lower.includes('query') && lower.includes('not found'))
+    || lower.includes('unknown operation')
+    || lower.includes('operation not found')
+    || (lower.includes('stored operation') && (lower.includes('resolve') || lower.includes('unknown') || lower.includes('not found')));
 }
 
 function isGuestAuthorizationError(message: string): boolean {
   return /auth|guest|unauthoriz|forbidden|denied/i.test(message);
 }
 
-async function isQueryValidationResponse(response: Response): Promise<boolean> {
+async function isOperationDriftResponse(response: Response): Promise<boolean> {
   try {
-    const text = (await response.clone().text()).toLowerCase();
-    return text.includes('query') && (text.includes('validation') || text.includes('operation'));
+    return isOperationDriftError(await response.clone().text());
   } catch {
     return false;
   }
@@ -532,8 +679,13 @@ export function extractTimelinePage(payload: unknown): TimelinePage {
       const content = asRecord(entry.content);
       if (content?.cursorType === 'Bottom' && typeof content.value === 'string') bottomCursor = content.value;
       for (const tweet of entryResults(entry)) {
-        const id = stringAt(unwrapTweet(tweet), 'rest_id');
-        if (id !== undefined && !seen.has(id)) {
+        const unwrapped = unwrapTweet(tweet);
+        const id = stringAt(unwrapped, 'rest_id');
+        if (id === undefined) {
+          if (isKnownNonTweetResult(unwrapped)) continue;
+          throw new GraphqlShapeError('X timeline tweet result did not contain rest_id');
+        }
+        if (!seen.has(id)) {
           seen.add(id);
           tweets.push(tweet);
         }
@@ -541,6 +693,16 @@ export function extractTimelinePage(payload: unknown): TimelinePage {
     }
   }
   return { tweets, bottomCursor };
+}
+
+function isKnownNonTweetResult(result: JsonRecord): boolean {
+  const type = stringAt(result, '__typename');
+  return type === 'TweetTombstone'
+    || type === 'TweetUnavailable'
+    || type === 'TweetWithheld'
+    || type === 'TweetDelete'
+    || type === 'TimelineMessagePrompt'
+    || type === 'TimelinePrompt';
 }
 
 function unwrapTweet(value: JsonRecord): JsonRecord {

@@ -73,6 +73,7 @@ describe('operation discovery and caching', () => {
       new Response('"https://x.com/assets/a.js" "/assets/b.js"', { status: 200 }),
       new Response('window.__x={"api":"AAAAAAAAAAAAANRILgAAAAAAbearer-token","queryId":"new-user","operationName":"UserByScreenName"};', { status: 200 }),
       new Response('"queryId":"new-timeline","operationName":"UserTweets" "queryId":"new-tweet","operationName":"TweetResultByRestId"', { status: 200 }),
+      new Response('"https://x.com/assets/a.js" "/assets/b.js"', { status: 200 }),
     ], calls);
     const registry = new OperationRegistry({ fetch, manifestUrl: 'https://x.com/manifest.js', bootstrap: operations });
 
@@ -81,7 +82,7 @@ describe('operation discovery and caching', () => {
     expect(discovered.bearer).toBe('AAAAAAAAAAAAANRILgAAAAAAbearer-token');
     expect(discovered.operations).toEqual({ UserByScreenName: 'new-user', UserTweets: 'new-timeline', TweetResultByRestId: 'new-tweet' });
     await registry.get();
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(4);
   });
 
   it('uses verified bootstrap operation ids when discovery assets are incomplete', async () => {
@@ -117,6 +118,37 @@ describe('operation discovery and caching', () => {
       fetch: async () => new Response(`{queryId:"fresh-user",${padding},operationName:"UserByScreenName"}{operationName:"UserTweets",queryId:"fresh-timeline"}{queryId:"fresh-tweet",operationName:"TweetResultByRestId"}`, { status: 200 }),
     });
     await expect(registry.get()).resolves.toMatchObject({ operations: { UserByScreenName: 'fresh-user', UserTweets: 'fresh-timeline', TweetResultByRestId: 'fresh-tweet' } });
+  });
+
+  it('revalidates the manifest build key and replaces cached IDs, features, and toggles for a new build', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const registry = new OperationRegistry({
+      bootstrap: operations,
+      manifestUrl: 'https://x.com/manifest.js',
+      fetch: queuedFetch([
+        new Response('buildId:"one" "/assets/one.js"', { status: 200 }),
+        new Response('{queryId:"one-timeline",operationName:"UserTweets"}', { status: 200 }),
+        new Response('buildId:"two" "/assets/two.js"', { status: 200 }),
+        new Response('{queryId:"two-timeline",operationName:"UserTweets"}', { status: 200 }),
+      ], calls),
+    });
+    await expect(registry.get()).resolves.toMatchObject({ buildKey: 'one', operations: { UserTweets: 'one-timeline' } });
+    await expect(registry.get()).resolves.toMatchObject({ buildKey: 'two', operations: { UserTweets: 'two-timeline' } });
+    expect(calls.map((call) => call.url)).toEqual([
+      'https://x.com/manifest.js', 'https://x.com/assets/one.js',
+      'https://x.com/manifest.js', 'https://x.com/assets/two.js',
+    ]);
+  });
+
+  it('parses nested unquoted and escaped JavaScript feature and field-toggle literals', async () => {
+    const registry = new OperationRegistry({
+      bootstrap: operations,
+      fetch: async () => new Response('features:{enabled:true,nested:{disabled:false},label:"a; \\"quoted\\" value",items:[1,true,"x"]},fieldToggles:{withArticle:true,nested:{mode:\'compact\'}}', { status: 200 }),
+    });
+    await expect(registry.get()).resolves.toMatchObject({
+      features: { enabled: true, nested: { disabled: false }, label: 'a; "quoted" value', items: [1, true, 'x'] },
+      fieldToggles: { withArticle: true, nested: { mode: 'compact' } },
+    });
   });
 });
 
@@ -189,6 +221,39 @@ describe('guest HTTP transport', () => {
       response(200, { data: { complete: true } }),
     ], []), sleep: async () => undefined });
     await expect(client.call('UserTweets', {})).resolves.toEqual({ complete: true });
+  });
+
+  it('refreshes once for a 200 PersistedQueryNotFound error-only payload', async () => {
+    let queryId = 'old';
+    const registry = {
+      get: async () => ({ bearer: 'b', operations: { ...operations, UserTweets: queryId }, features: {}, fieldToggles: {}, buildKey: null, bootstrapOperations: [] }),
+      invalidate: () => { queryId = 'new'; },
+    } as unknown as OperationRegistry;
+    const session = { headers: async () => ({}), refresh: async () => undefined } as unknown as GuestSession;
+    const client = new XGraphqlClient({ registry, session, fetch: queuedFetch([
+      response(200, { errors: [{ code: 'PersistedQueryNotFound' }] }),
+      response(200, { data: { complete: true } }),
+    ], []), sleep: async () => undefined });
+    await expect(client.call('UserTweets', {})).resolves.toEqual({ complete: true });
+  });
+
+  it('refreshes once for a 400 unknown stored operation and then raises drift if it persists', async () => {
+    let queryId = 'old';
+    const registry = {
+      get: async () => ({ bearer: 'b', operations: { ...operations, UserTweets: queryId }, features: {}, fieldToggles: {}, buildKey: null, bootstrapOperations: [] }),
+      invalidate: () => { queryId = 'new'; },
+    } as unknown as OperationRegistry;
+    const session = { headers: async () => ({}), refresh: async () => undefined } as unknown as GuestSession;
+    const successfulRefresh = new XGraphqlClient({ registry, session, fetch: queuedFetch([
+      response(400, { errors: [{ message: 'Could not resolve to a stored operation' }] }),
+      response(200, { data: { complete: true } }),
+    ], []), sleep: async () => undefined });
+    await expect(successfulRefresh.call('UserTweets', {})).resolves.toEqual({ complete: true });
+    const persistent = new XGraphqlClient({ registry, session, fetch: queuedFetch([
+      response(400, { errors: [{ message: 'Unknown operation' }] }),
+      response(400, { errors: [{ message: 'Unknown operation' }] }),
+    ], []), sleep: async () => undefined });
+    await expect(persistent.call('UserTweets', {})).rejects.toBeInstanceOf(OperationDriftError);
   });
 
   it('does not return partial data when GraphQL reports a non-retryable error', async () => {
@@ -311,7 +376,9 @@ describe('URT parsing, normalization, and filters', () => {
     expect(() => extractTimelinePage({ data: { user: {} } })).toThrow(/timeline/i);
     expect(() => extractTimelinePage({ data: { user: { result: { timeline_v2: { timeline: { instructions: ['bad'] } } } } } })).toThrow(/instruction/i);
     expect(() => extractTimelinePage({ data: { user: { result: { timeline_v2: { timeline: { instructions: [{ type: 'TimelineAddEntries', entries: ['bad'] }] } } } } } })).toThrow(/entry/i);
+    expect(() => extractTimelinePage({ data: { user: { result: { timeline_v2: { timeline: { instructions: [{ type: 'TimelineAddEntries', entries: [{ entryId: 'tweet-bad', content: { itemContent: { tweet_results: { result: {} } } } }] }] } } } } } })).toThrow(/rest_id/i);
     expect(extractTimelinePage({ data: { user: { result: { timeline_v2: { timeline: { instructions: [{ type: 'TimelineAddEntries', entries: [{ entryId: 'cursor-bottom', content: { cursorType: 'Bottom', value: 'next' } }] }] } } } } } })).toEqual({ tweets: [], bottomCursor: 'next' });
+    expect(extractTimelinePage({ data: { user: { result: { timeline_v2: { timeline: { instructions: [{ type: 'TimelineAddEntries', entries: [{ entryId: 'tweet-tombstone', content: { itemContent: { tweet_results: { result: { __typename: 'TweetTombstone' } } } } }] }] } } } } } })).toEqual({ tweets: [], bottomCursor: null });
     expect(() => normalizeTweet({ rest_id: '101', legacy: {} }, '2025-01-02T00:00:00.000Z')).toThrow(/tweet/i);
   });
 
