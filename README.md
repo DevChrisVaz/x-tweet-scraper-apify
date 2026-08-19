@@ -19,6 +19,14 @@ dataset <- emission guard <- signed grant <- Redis Lua reservation <- Ed25519 si
 
 The supported input is defined by INPUT_SCHEMA.json. Use a non-empty fromUsers array for author timelines or a non-empty tweetIds array for individual tweets. maxResults, date/language/engagement filters, reply/retweet flags, media filters, verification, and the documented Apify proxy configuration are supported. searchTerms is rejected by the platform schema and runtime: this Actor does not pretend to implement search through X's top authentication wall.
 
+### Authentication (Bypassing Guest Limits)
+
+X (Twitter) heavily rate-limits or blocks standard GraphQL Guest Sessions, often returning `422 Unprocessable Entity` or `403 Forbidden` errors. To bypass these new anti-scraping blocks, you can provide an `authCookies` array in the input (e.g., `["auth_token=...; ct0=..."]`). 
+
+When `authCookies` are provided, the scraper operates as an authenticated session. It automatically extracts the `ct0` value from the provided cookie string to generate the required `x-csrf-token` header. 
+
+**⚠️ WARNING:** Scraping as an authenticated user carries a high risk of account suspension. It is strongly recommended to use **throwaway accounts** when utilizing the `authCookies` feature. Do not use your primary or valuable X accounts.
+
 Each dataset item follows OUTPUT_SCHEMA.json, including stable author, metrics, entities, media, source, UTC createdAt, and UTC-Z scrapedAt. Run-level tier, effective limit, and discovered, filtered, reserved, emitted, denied, and errors statistics are written to the persisted output metadata contract. Malformed X graph shapes are rejected rather than turned into partial output.
 
 Supported HTTP-only surfaces are:
