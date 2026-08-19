@@ -7,6 +7,7 @@
     "node": ">=24 <25"
   },
   "scripts": {
+    "preflight:node": "node scripts/check-node-version.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
@@ -20,7 +21,7 @@
     "signer:smoke": "npm run build && node scripts/signer-smoke.mjs",
     "smoke:live": "npm run build && node scripts/live-smoke.mjs",
     "benchmark:live": "npm run build && node scripts/benchmark.mjs",
-    "verify": "npm run check:browser && npm run validate:packaging && npm run lint && npm run typecheck && npm test && npm run build"
+    "verify": "npm run preflight:node && npm run check:browser && npm run validate:packaging && npm run lint && npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "apify": "^3.5.2",

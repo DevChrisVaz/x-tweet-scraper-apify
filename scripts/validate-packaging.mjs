@@ -19,6 +19,7 @@ if (!dockerfile.includes('CMD ["node", "dist/index.js"]')) fail('Dockerfile must
 const actor = json('.actor/actor.json');
 if (actor.dockerfile !== '../Dockerfile') fail('Apify manifest must use the supported top-level dockerfile field');
 if (Object.prototype.hasOwnProperty.call(actor, 'build')) fail('Apify manifest must not use the obsolete nested build field');
+if (actor.storages?.dataset !== '../OUTPUT_SCHEMA.json') fail('Apify manifest must point dataset storage at the standalone item schema');
 for (const [label, path] of [['Dockerfile', actor.dockerfile], ['input schema', actor.input], ['dataset schema', actor.storages?.dataset]]) {
   if (typeof path !== 'string') fail(`Apify manifest is missing its ${label} path`);
   try {
@@ -27,6 +28,11 @@ for (const [label, path] of [['Dockerfile', actor.dockerfile], ['input schema', 
     fail(`Apify manifest references a missing ${label}`);
   }
 }
+const datasetSchema = json('OUTPUT_SCHEMA.json');
+if (datasetSchema.type === 'array' || datasetSchema.$schema === undefined || datasetSchema.definitions === undefined) fail('dataset schema must be a standalone per-item object schema');
+const inputSchema = json('INPUT_SCHEMA.json');
+if (inputSchema.properties?.searchTerms?.maxItems !== 0) fail('input schema must reject non-empty searchTerms');
+if (!Array.isArray(inputSchema.anyOf) || inputSchema.anyOf.length !== 2) fail('input schema must require fromUsers or tweetIds');
 
 const vercel = json('vercel.json');
 const functions = vercel.functions;
@@ -40,11 +46,19 @@ const eslint = text('eslint.config.mjs');
 if (!eslint.includes("'**/.worktrees/**'") || !eslint.includes("'**/dist/**'")) fail('ESLint must ignore nested worktrees and generated dist directories');
 
 const envExample = text('.env.example');
-for (const name of ['UPSTASH_REDIS_REST_TOKEN', 'ENTITLEMENT_HMAC_SECRET', 'ENTITLEMENT_SIGNING_PRIVATE_KEY']) {
+for (const name of ['KV_REST_API_TOKEN', 'UPSTASH_REDIS_REST_TOKEN', 'ENTITLEMENT_HMAC_SECRET', 'ENTITLEMENT_SIGNING_PRIVATE_KEY']) {
   const line = envExample.split('\n').find((value) => value.startsWith(`${name}=`));
   if (line !== `${name}=`) fail(`.env.example must not contain a value for ${name}`);
 }
 if (/BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY|(?:sk|xox)[-_][A-Za-z0-9]/i.test(envExample)) fail('.env.example contains a private-value pattern');
+const entitlementSource = text('src/vercel-entitlements.ts');
+for (const name of ['KV_REST_API_URL', 'KV_REST_API_TOKEN', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN']) {
+  if (!entitlementSource.includes(name)) fail(`signer environment mapping is missing ${name}`);
+}
+const readme = text('README.md');
+for (const identifier of ['x-tweet-scraper-entitlements', 'upstash-kv-cordovan-village']) {
+  if (!readme.includes(identifier)) fail(`deployment documentation is missing ${identifier}`);
+}
 
 const dependencyCheck = spawnSync(process.execPath, ['scripts/check-browser-deps.mjs'], { cwd: new URL('..', import.meta.url), encoding: 'utf8' });
 if (dependencyCheck.status !== 0) fail(dependencyCheck.stderr || dependencyCheck.stdout || 'browser dependency check failed');

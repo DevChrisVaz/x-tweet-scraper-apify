@@ -17,7 +17,7 @@ dataset <- emission guard <- signed grant <- Redis Lua reservation <- Ed25519 si
 
 ## Input and output
 
-The supported input is defined by INPUT_SCHEMA.json. Use fromUsers for author timelines or tweetIds for individual tweets. maxResults, date/language/engagement filters, reply/retweet flags, media filters, verification, and the documented Apify proxy configuration are supported. searchTerms is intentionally rejected: this Actor does not pretend to implement search through X's top authentication wall.
+The supported input is defined by INPUT_SCHEMA.json. Use a non-empty fromUsers array for author timelines or a non-empty tweetIds array for individual tweets. maxResults, date/language/engagement filters, reply/retweet flags, media filters, verification, and the documented Apify proxy configuration are supported. searchTerms is rejected by the platform schema and runtime: this Actor does not pretend to implement search through X's top authentication wall.
 
 Each dataset item follows OUTPUT_SCHEMA.json, including stable author, metrics, entities, media, source, UTC createdAt, and UTC-Z scrapedAt. Run-level tier, effective limit, and discovered, filtered, reserved, emitted, denied, and errors statistics are written to the persisted output metadata contract. Malformed X graph shapes are rejected rather than turned into partial output.
 
@@ -43,10 +43,11 @@ Apify state is versioned and contains target cursors, visited cursors, seen IDs,
 
 ## Local checks and smoke commands
 
-Use Node.js 24 (the repository pins >=24 <25 in package.json and .node-version):
+Use Node.js 24 (the repository pins >=24 <25 in package.json and .node-version, enforces engine-strict in .npmrc, and runs a preflight check):
 
 ~~~sh
 npm ci
+npm run preflight:node
 npm run verify
 npm run fixture:run
 npm run signer:smoke
@@ -60,16 +61,16 @@ The live commands are opt-in and HTTP-only. They require explicit targets and co
 
 The production Actor is built by Dockerfile from Node 24 and starts dist/index.js. .actor/actor.json points to that Dockerfile and the checked-in input/dataset schemas. The Vercel Functions in api/entitlements/ are configured in vercel.json for nodejs24.x and Fluid Compute-compatible Node execution; they are not Edge Functions.
 
-The intended/provisioned names are Vercel project x-tweet-scraper-entitlements and Marketplace resource upstash-kv-cordovan-village. Connection of that resource, secret configuration, Vercel deployment, and Apify deployment remain Task 6 actions; this worktree makes no deployment claim. The example contains names and harmless placeholders only; private keys, HMACs, REST tokens, and .env.local values must never be committed or printed. The Actor receives only its endpoint, HMAC, and pinned public key through the deployment secret mechanism; payer status continues to come from Apify runtime identity.
+The intended/provisioned names are Vercel project x-tweet-scraper-entitlements and Marketplace resource upstash-kv-cordovan-village. Connection of that resource, secret configuration, Vercel deployment, and Apify deployment remain Task 6 actions; this worktree makes no deployment claim. The Marketplace normally injects KV_REST_API_URL and KV_REST_API_TOKEN. The signer accepts those names and falls back to UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN; when both mappings exist, the UPSTASH_REDIS_REST_* aliases take precedence. The example contains names and harmless placeholders only; private keys, HMACs, REST tokens, and .env.local values must never be committed or printed. The Actor receives only its endpoint, HMAC, and pinned public key through the deployment secret mechanism; payer status continues to come from Apify runtime identity.
 
 Task 6 operator checklist (authenticated operator only; not executed here):
 
 1. In the Vercel dashboard, confirm project x-tweet-scraper-entitlements and attach the existing resource upstash-kv-cordovan-village; do not create a second Redis resource.
-2. Link locally with `vercel link --project x-tweet-scraper-entitlements`, pull only to an ignored file with `vercel env pull .env.local`, and configure the names from .env.example through the dashboard or interactive CLI without placing secret values in commands, logs, or commits.
+2. Link locally with `vercel link --project x-tweet-scraper-entitlements`, pull only to an ignored file with `vercel env pull .env.local`, and confirm the attached resource supplies KV_REST_API_URL/KV_REST_API_TOKEN (or explicitly configure the UPSTASH_REDIS_REST_* aliases). Do not place secret values in commands, logs, or commits.
 3. Run `npm ci`, `npm run verify`, and `npm run docker:build` where Docker is available; inspect the generated deployment configuration.
 4. After reviewing the pinned public key and canonical actor binding, an authorized operator may run `vercel deploy --prod` and the normal Apify Actor release command (`apify push`). These commands were not run for Task 5.
 
-CI runs clean npm ci, browser-engine policy, packaging validation, lint, strict typecheck, the complete Vitest suite, build, and a Docker build on Node 24. The workflow does not publish or deploy. A deployment gate should run these checks again and verify the configured signer public key and actor binding before accepting traffic.
+CI runs clean npm ci, browser-engine policy, packaging validation, lint, strict typecheck, the complete Vitest suite, build, and a Docker build on Node 24; both CI jobs that invoke npm use setup-node with Node 24. The workflow does not publish or deploy. A deployment gate should run these checks again and verify the configured signer public key and actor binding before accepting traffic.
 
 ## Limitations, cost, and authorization
 

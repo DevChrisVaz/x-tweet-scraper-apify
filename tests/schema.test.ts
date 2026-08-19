@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const outputSchema = JSON.parse(readFileSync(new URL('../OUTPUT_SCHEMA.json', import.meta.url), 'utf8')) as object;
+const inputSchema = JSON.parse(readFileSync(new URL('../INPUT_SCHEMA.json', import.meta.url), 'utf8')) as object;
 
 const completeTweet = {
   id: '123',
@@ -31,5 +32,17 @@ describe('output JSON schema', () => {
     expect(validate({ ...completeTweet, createdAt: '2025-01-01T00:00:00+05:00' })).toBe(false);
     expect(validate({ ...completeTweet, scrapedAt: '2025-01-01T00:00:01+05:00' })).toBe(false);
     expect(validate({ ...completeTweet, scrapedAt: '2025-01-01T00:00:01.123Z' })).toBe(true);
+  });
+});
+
+describe('input JSON schema', () => {
+  it('rejects unsupported searchTerms and empty target selections at the platform boundary', () => {
+    const validate = new Ajv().compile(inputSchema);
+
+    expect(validate({ fromUsers: ['apify'] })).toBe(true);
+    expect(validate({ tweetIds: ['123'] })).toBe(true);
+    expect(validate({ fromUsers: [], tweetIds: [], searchTerms: [] })).toBe(false);
+    expect(validate({ searchTerms: ['apify'] })).toBe(false);
+    expect(validate({ fromUsers: ['apify'], searchTerms: ['unsupported'] })).toBe(false);
   });
 });

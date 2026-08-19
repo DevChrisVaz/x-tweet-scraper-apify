@@ -6,7 +6,7 @@
   "properties": {
     "fromUsers": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] },
     "tweetIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] },
-    "searchTerms": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [], "description": "Unsupported and rejected clearly by the runtime contract." },
+    "searchTerms": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 0, "default": [], "description": "Unsupported; the platform boundary rejects non-empty values." },
     "hashtags": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] },
     "since": { "type": "string", "description": "ISO-8601 date or timestamp, inclusive." },
     "until": { "type": "string", "description": "ISO-8601 date or timestamp, inclusive." },
@@ -31,8 +31,7 @@
     }
   },
   "anyOf": [
-    { "required": ["fromUsers"] },
-    { "required": ["tweetIds"] },
-    { "required": ["searchTerms"] }
+    { "required": ["fromUsers"], "properties": { "fromUsers": { "minItems": 1 } } },
+    { "required": ["tweetIds"], "properties": { "tweetIds": { "minItems": 1 } } }
   ]
 }
