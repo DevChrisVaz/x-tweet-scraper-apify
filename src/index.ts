@@ -10,6 +10,10 @@ export interface ApifyPersistenceApi {
   setValue(key: string, value: unknown, options?: Record<string, unknown>): Promise<void>;
 }
 
+export interface ApifyDatasetApi {
+  getData(options: { offset: number; limit: number; clean: boolean; fields: string[] }): Promise<{ items: unknown[]; count: number; total: number }>;
+}
+
 export interface ActorRuntimeApi extends ApifyPersistenceApi {
   init(): Promise<void>;
   exit(): Promise<void>;
@@ -20,6 +24,7 @@ export interface ActorRuntimeApi extends ApifyPersistenceApi {
     apifyProxyGroups?: string[];
     apifyProxyCountry?: string;
   }): Promise<{ newUrl(sessionId?: string): Promise<string | undefined> } | undefined>;
+  openDataset(): Promise<ApifyDatasetApi>;
   pushData(data: unknown): Promise<void>;
 }
 
@@ -42,12 +47,37 @@ function proxySessionId(value: string): string {
   return value.replace(/[^0-9A-Za-z._~]/g, '_').slice(0, 50);
 }
 
-async function createTargetClient(proxyUrl: string | undefined): Promise<XTargetClient> {
+async function createTargetClient(proxyUrl: string | undefined, registry: OperationRegistry): Promise<XTargetClient> {
   const transport = proxyUrl === undefined ? fetch : createStickyProxyFetch(proxyUrl);
-  const registry = new OperationRegistry({ fetch: transport });
   const discovery = await registry.get();
   const session = new GuestSession({ fetch: transport, bearer: discovery.bearer, ...(proxyUrl === undefined ? {} : { proxyUrl }) });
   return new XGraphqlClient({ registry, session, fetch: transport });
+}
+
+/**
+ * The default dataset is the delivery ledger. On a restart, reconcile every
+ * checkpoint-pending grant against its TweetOutput ID before pushing again.
+ * This closes the unavoidable crash window after `pushData` succeeds but before
+ * coordinator state is durably checkpointed.
+ */
+export async function createDefaultDatasetDeliveryReconciler(actor: Pick<ActorRuntimeApi, 'openDataset'>): Promise<(tweetId: string) => Promise<boolean>> {
+  const dataset = await actor.openDataset();
+  let delivered: Set<string> | undefined;
+  return async (tweetId: string): Promise<boolean> => {
+    if (delivered === undefined) {
+      delivered = new Set<string>();
+      let offset = 0;
+      for (;;) {
+        const page = await dataset.getData({ offset, limit: 1_000, clean: true, fields: ['id'] });
+        for (const item of page.items) {
+          if (item !== null && typeof item === 'object' && typeof (item as Record<string, unknown>).id === 'string') delivered.add((item as Record<string, unknown>).id as string);
+        }
+        offset += page.count;
+        if (page.count === 0 || offset >= page.total) break;
+      }
+    }
+    return delivered.has(tweetId);
+  };
 }
 
 function fallbackSubject(env: Record<string, unknown>): { actorId: string; runId: string; userId: string } {
@@ -109,22 +139,25 @@ export async function runApifyActorWithRuntime(actor: ActorRuntimeApi): Promise<
       ...(process.env.ENTITLEMENT_KEY_ID === undefined ? {} : { pinnedKeyId: process.env.ENTITLEMENT_KEY_ID }),
     });
     const guard = new EmissionGuard(entitlement);
+    const hasDelivered = await createDefaultDatasetDeliveryReconciler(actor);
     const proxyOptions = input.proxyConfiguration === undefined ? undefined : {
       useApifyProxy: input.proxyConfiguration.useApifyProxy,
       ...(input.proxyConfiguration.apifyProxyGroups === undefined ? {} : { apifyProxyGroups: input.proxyConfiguration.apifyProxyGroups }),
       ...(input.proxyConfiguration.apifyProxyCountry === undefined ? {} : { apifyProxyCountry: input.proxyConfiguration.apifyProxyCountry }),
     };
     const proxy = await actor.createProxyConfiguration(proxyOptions);
+    const registry = new OperationRegistry({});
     await runCoordinator({
       input,
       subject: identity.subject,
-      sourceFactory: async (target) => createTargetClient(await proxy?.newUrl(proxySessionId(target.key))),
+      sourceFactory: async (target) => createTargetClient(await proxy?.newUrl(proxySessionId(target.key)), registry),
       entitlement,
       emission: {
         reserveBatch: async (tweetIds) => guard.reserveBatch(tweetIds),
         emit: async (tweetId, push) => (await guard.emit(tweetId, async () => { await push(); return true; })) === true,
       },
       persistence,
+      hasDelivered,
       pushData: async (tweet: TweetOutput) => actor.pushData(tweet),
       log: (entry) => log.warning('X coordinator event', entry),
     });

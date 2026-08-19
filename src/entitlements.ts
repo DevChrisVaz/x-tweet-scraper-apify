@@ -225,7 +225,7 @@ export class EntitlementService {
     const issuedAt = new Date(issuedAtMs).toISOString();
     const expiresAt = new Date(issuedAtMs + ENTITLEMENT_TTL_SECONDS * 1_000).toISOString();
     const tier: RunRecord['tier'] = input.isPaying ? 'paid' : 'free';
-    const effectiveLimit = input.isPaying ? input.maxResults : FREE_LIMIT;
+    const effectiveLimit = input.isPaying ? input.maxResults : Math.min(FREE_LIMIT, input.maxResults);
     const run = await this.repository.getOrCreateRun({ subject: input.subject, tier, effectiveLimit, issuedAt, expiresAt });
     const payload = { subject: run.subject, tier: run.tier, effectiveLimit: run.effectiveLimit, expiresAt: run.expiresAt, issuedAt: run.issuedAt };
     return EntitlementResolutionSchema.parse({ ...payload, signature: this.sign(payload), keyId: this.options.signingKeyId });

@@ -70,6 +70,8 @@ export interface CoordinatorOptions {
   emission: EmissionBoundary;
   persistence: CoordinatorPersistence;
   pushData(tweet: TweetOutput): Promise<void>;
+  /** Reconciles a granted, checkpoint-pending ID with an idempotent output sink after a crash. */
+  hasDelivered?(tweetId: string): Promise<boolean>;
   now?: () => string;
   concurrency?: number;
   normalize?: (raw: unknown) => TweetOutput;
@@ -236,6 +238,14 @@ export async function runCoordinator(options: CoordinatorOptions): Promise<Outpu
 
     const pushGranted = async (tweetId: string, pending: PendingTweet): Promise<DrainResult> => {
       try {
+        if (options.hasDelivered !== undefined && await options.hasDelivered(tweetId)) {
+          // The dataset append committed before the previous process died. Count it exactly
+          // once in coordinator state without invoking the signer or pushing a duplicate.
+          state.statistics.emitted += 1;
+          completeTerminal(tweetId, false);
+          await persistSafely();
+          return { unavailable: false };
+        }
         const emitted = await options.emission.emit(tweetId, async () => options.pushData(pending.tweet));
         if (emitted) {
           state.statistics.emitted += 1;

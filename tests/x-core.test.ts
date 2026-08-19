@@ -6,6 +6,7 @@ import {
   OperationDriftError,
   OperationRegistry,
   RateLimitError,
+  RequestTimeoutError,
   XGraphqlClient,
   applyTweetFilters,
   createStickyProxyFetch,
@@ -82,7 +83,7 @@ describe('operation discovery and caching', () => {
     expect(discovered.bearer).toBe('AAAAAAAAAAAAANRILgAAAAAAbearer-token');
     expect(discovered.operations).toEqual({ UserByScreenName: 'new-user', UserTweets: 'new-timeline', TweetResultByRestId: 'new-tweet' });
     await registry.get();
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(3);
   });
 
   it('uses verified bootstrap operation ids when discovery assets are incomplete', async () => {
@@ -125,6 +126,7 @@ describe('operation discovery and caching', () => {
     const registry = new OperationRegistry({
       bootstrap: operations,
       manifestUrl: 'https://x.com/manifest.js',
+      freshnessTtlMs: 0,
       fetch: queuedFetch([
         new Response('buildId:"one" "/assets/one.js"', { status: 200 }),
         new Response('{queryId:"one-timeline",operationName:"UserTweets"}', { status: 200 }),
@@ -149,6 +151,66 @@ describe('operation discovery and caching', () => {
       features: { enabled: true, nested: { disabled: false }, label: 'a; "quoted" value', items: [1, true, 'x'] },
       fieldToggles: { withArticle: true, nested: { mode: 'compact' } },
     });
+  });
+
+  it('keeps a registry snapshot fresh for a bounded TTL, then checks the next manifest build', async () => {
+    let now = 0;
+    const calls: string[] = [];
+    const responses = [
+      new Response('buildId:"one" "/assets/one.js"', { status: 200 }),
+      new Response('{queryId:"one-timeline",operationName:"UserTweets"}', { status: 200 }),
+      new Response('buildId:"two" "/assets/two.js"', { status: 200 }),
+      new Response('{queryId:"two-timeline",operationName:"UserTweets"}', { status: 200 }),
+    ];
+    const registry = new OperationRegistry({
+      bootstrap: operations,
+      manifestUrl: 'https://x.com/manifest.js',
+      freshnessTtlMs: 1_000,
+      now: () => now,
+      fetch: async (url) => {
+        calls.push(String(url));
+        const next = responses.shift();
+        if (next === undefined) throw new Error('unexpected public discovery request');
+        return next;
+      },
+    });
+    await expect(registry.get()).resolves.toMatchObject({ buildKey: 'one', operations: { UserTweets: 'one-timeline' } });
+    await expect(registry.get()).resolves.toMatchObject({ buildKey: 'one', operations: { UserTweets: 'one-timeline' } });
+    expect(calls).toEqual(['https://x.com/manifest.js', 'https://x.com/assets/one.js']);
+    now = 1_001;
+    await expect(registry.get()).resolves.toMatchObject({ buildKey: 'two', operations: { UserTweets: 'two-timeline' } });
+    expect(calls).toEqual([
+      'https://x.com/manifest.js', 'https://x.com/assets/one.js',
+      'https://x.com/manifest.js', 'https://x.com/assets/two.js',
+    ]);
+  });
+
+  it('invalidates a fresh registry snapshot immediately on operation drift', async () => {
+    const calls: string[] = [];
+    const responses = [
+      new Response('buildId:"one" "/assets/one.js"', { status: 200 }),
+      new Response('{queryId:"one-timeline",operationName:"UserTweets"}', { status: 200 }),
+      new Response('buildId:"two" "/assets/two.js"', { status: 200 }),
+      new Response('{queryId:"two-timeline",operationName:"UserTweets"}', { status: 200 }),
+    ];
+    const registry = new OperationRegistry({
+      bootstrap: operations,
+      manifestUrl: 'https://x.com/manifest.js',
+      freshnessTtlMs: 60_000,
+      fetch: async (url) => {
+        calls.push(String(url));
+        const next = responses.shift();
+        if (next === undefined) throw new Error('unexpected public discovery request');
+        return next;
+      },
+    });
+    await registry.get();
+    registry.invalidate();
+    await expect(registry.get()).resolves.toMatchObject({ buildKey: 'two', operations: { UserTweets: 'two-timeline' } });
+    expect(calls).toEqual([
+      'https://x.com/manifest.js', 'https://x.com/assets/one.js',
+      'https://x.com/manifest.js', 'https://x.com/assets/two.js',
+    ]);
   });
 });
 
@@ -176,10 +238,34 @@ describe('guest HTTP transport', () => {
     const client = new XGraphqlClient({ registry, session, fetch: queuedFetch([response(404, {}), response(200, { data: { user: 'ok' } })], calls), sleep: async () => undefined });
 
     await expect(client.call('UserByScreenName', { screen_name: 'author' })).resolves.toEqual({ user: 'ok' });
-    expect(calls.map((call) => call.url)).toEqual([
-      'https://api.x.com/graphql/stale/UserByScreenName',
-      'https://api.x.com/graphql/fresh/UserByScreenName',
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      '/graphql/stale/UserByScreenName',
+      '/graphql/fresh/UserByScreenName',
     ]);
+  });
+
+  it('uses the verified public api GraphQL GET boundary with JSON query parameters', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const features = { responsive_web_graphql_exclude_directive_enabled: true };
+    const fieldToggles = { withArticlePlainText: false };
+    const registry = {
+      get: async () => ({ bearer: 'b', operations, features, fieldToggles, buildKey: 'build' }),
+      invalidate: () => undefined,
+    } as unknown as OperationRegistry;
+    const session = { headers: async () => ({ authorization: 'Bearer b', 'x-guest-token': 'guest' }), refresh: async () => undefined } as unknown as GuestSession;
+    const client = new XGraphqlClient({ registry, session, fetch: queuedFetch([response(200, { data: { ok: true } })], calls), sleep: async () => undefined });
+
+    await expect(client.call('UserByScreenName', { screen_name: 'author', withSafetyModeUserFields: true })).resolves.toEqual({ ok: true });
+    const call = calls[0];
+    const url = new URL(call?.url ?? '');
+    expect(url.origin).toBe('https://api.x.com');
+    expect(url.pathname).toBe(`/graphql/${operations.UserByScreenName}/UserByScreenName`);
+    expect(call?.init?.method).toBe('GET');
+    expect(call?.init?.body).toBeUndefined();
+    expect(new Headers(call?.init?.headers).has('content-type')).toBe(false);
+    expect(JSON.parse(url.searchParams.get('variables') ?? '')).toEqual({ screen_name: 'author', withSafetyModeUserFields: true });
+    expect(JSON.parse(url.searchParams.get('features') ?? '')).toEqual(features);
+    expect(JSON.parse(url.searchParams.get('fieldToggles') ?? '')).toEqual(fieldToggles);
   });
 
   it('raises operation drift after the single rediscovery retry also fails validation', async () => {
@@ -206,7 +292,7 @@ describe('guest HTTP transport', () => {
     const session = { headers: async () => ({}), refresh: async () => undefined } as unknown as GuestSession;
     const client = new XGraphqlClient({ registry, session, fetch: queuedFetch([response(400, { errors: [{ message: 'Query validation failed' }] }), response(200, { data: { ok: true } })], calls), sleep: async () => undefined });
     await expect(client.call('UserTweets', {})).resolves.toEqual({ ok: true });
-    expect(calls.map((call) => call.url)).toEqual(['https://api.x.com/graphql/old/UserTweets', 'https://api.x.com/graphql/new/UserTweets']);
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual(['/graphql/old/UserTweets', '/graphql/new/UserTweets']);
   });
 
   it('refreshes once for a successful HTTP response carrying GraphQL query validation errors', async () => {
@@ -325,6 +411,30 @@ describe('guest HTTP transport', () => {
     await expect(client.call('UserTweets', {})).resolves.toEqual({ ok: true });
     expect(waits).toEqual([250, 500]);
   });
+
+  it('classifies an AbortSignal deadline as a bounded transient retry', async () => {
+    const registry = { get: async () => ({ bearer: 'b', operations, features: {}, fieldToggles: {} }), invalidate: () => undefined } as unknown as OperationRegistry;
+    const session = { headers: async () => ({}), refresh: async () => undefined } as unknown as GuestSession;
+    const waits: number[] = [];
+    let calls = 0;
+    const client = new XGraphqlClient({
+      registry,
+      session,
+      requestTimeoutMs: 1,
+      fetch: async (_url, init) => {
+        calls += 1;
+        if (init?.signal === undefined) throw new Error('request did not receive a deadline signal');
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+        });
+      },
+      sleep: async (milliseconds) => { waits.push(milliseconds); },
+      random: () => 0,
+    });
+    await expect(client.call('UserTweets', {})).rejects.toBeInstanceOf(RequestTimeoutError);
+    expect(calls).toBe(3);
+    expect(waits).toEqual([250, 500]);
+  });
 });
 
 describe('URT parsing, normalization, and filters', () => {
@@ -397,5 +507,30 @@ describe('URT parsing, normalization, and filters', () => {
     const normalized = normalizeTweet(punctuated, '2025-01-02T00:00:00.000Z');
     expect(normalized.text).toBe('Read https://example.com/article, now');
     expect(normalized.source).toBe('Client "App" & 🚀');
+  });
+
+  it('prefers canonical note text and entities and recognizes outer Blue verification', () => {
+    const note = structuredClone(rawTweet) as typeof rawTweet & { core: { user_results: { result: { is_blue_verified?: boolean } } }; legacy: typeof rawTweet.legacy & { note_tweet?: unknown } };
+    note.core.user_results.result.is_blue_verified = true;
+    note.legacy.note_tweet = {
+      note_tweet_results: {
+        result: {
+          text: 'Long note https://t.co/n #Note @note',
+          entity_set: {
+            urls: [{ url: 'https://t.co/n', expanded_url: 'https://example.com/note' }],
+            hashtags: [{ text: 'Note' }],
+            user_mentions: [{ screen_name: 'note' }],
+          },
+        },
+      },
+    };
+    note.legacy.source = '<a>Reader &copy; &mdash; &hellip;</a>';
+    const normalized = normalizeTweet(note, '2025-01-02T00:00:00.000Z');
+    expect(normalized).toMatchObject({
+      text: 'Long note https://example.com/note #Note @note',
+      author: { verified: true },
+      entities: { hashtags: ['Note'], mentions: ['note'], urls: ['https://example.com/note'] },
+      source: 'Reader © — …',
+    });
   });
 });

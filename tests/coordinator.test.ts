@@ -287,6 +287,36 @@ describe('actor coordinator integration', () => {
     expect(pushed.map((tweet) => tweet.id)).toEqual(['granted-retry']);
   });
 
+  it('reconciles a granted pending tweet with the output sink after a push-before-checkpoint crash', async () => {
+    const storage = memoryState();
+    const sourceFactory = source({ a: [rawTweet('crash-safe')] });
+    const delivered = new Set<string>();
+    await runCoordinator({
+      input: { fromUsers: ['a'], maxResults: 10 }, subject, sourceFactory,
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 10 }) },
+      emission: {
+        reserveBatch: async (ids) => ({ grantedIds: new Set(ids), deniedIds: new Set<string>() }),
+        emit: async (_id, push) => { await push(); throw new Error('simulated process death after dataset append'); },
+      },
+      persistence: storage.persistence,
+      pushData: async (tweet) => { delivered.add(tweet.id); },
+      now: () => '2025-01-02T00:00:00.000Z',
+    });
+    expect(storage.state).toMatchObject({ seenIds: [], pending: { 'crash-safe': { granted: true } } });
+
+    let resumedPushes = 0;
+    await runCoordinator({
+      input: { fromUsers: ['a'], maxResults: 10 }, subject, sourceFactory,
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 10 }) }, emission: emitter(10).boundary,
+      persistence: storage.persistence,
+      hasDelivered: async (tweetId) => delivered.has(tweetId),
+      pushData: async () => { resumedPushes += 1; },
+      now: () => '2025-01-02T00:00:00.000Z',
+    });
+    expect(resumedPushes).toBe(0);
+    expect(storage.state).toMatchObject({ seenIds: ['crash-safe'], pending: {}, statistics: { emitted: 1 } });
+  });
+
   it('persists an exhausted target when a timeline repeats a cursor', async () => {
     const storage = memoryState();
     const guard = emitter(10);

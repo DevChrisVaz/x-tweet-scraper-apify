@@ -69,6 +69,19 @@ describe('entitlement authentication', () => {
 });
 
 describe('frozen entitlement reservations', () => {
+  it('caps each free run at the smaller of the requested limit and ten', async () => {
+    const repository = new InMemoryEntitlementRepository();
+    const service = new EntitlementService(repository, {
+      signingPrivateKey: keyPair.privateKey,
+      signingKeyId: 'test-key',
+      now: () => 1_700_000_000_000,
+    });
+    for (const [requested, expected] of [[1, 1], [9, 9], [10, 10], [1_000, 10]] as const) {
+      const resolution = await service.resolve({ subject: { ...subject, runId: `free-${requested}` }, maxResults: requested, isPaying: false });
+      expect(resolution.effectiveLimit).toBe(expected);
+    }
+  });
+
   it('free runs freeze 10, paid runs freeze maxResults, and duplicate IDs are idempotent', async () => {
     const repository = new InMemoryEntitlementRepository();
     const service = new EntitlementService(repository, {

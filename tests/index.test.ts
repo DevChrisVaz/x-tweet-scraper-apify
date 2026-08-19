@@ -1,9 +1,28 @@
 import { describe, expect, it } from 'vitest';
 import * as actorEntry from '../src/index.js';
-import { createApifyPersistence } from '../src/index.js';
+import { createApifyPersistence, createDefaultDatasetDeliveryReconciler } from '../src/index.js';
 import type { CoordinatorState } from '../src/coordinator.js';
 
 describe('Apify coordinator adapter', () => {
+  it('reconciles delivered TweetOutput IDs from every page of the default dataset after a restart', async () => {
+    const calls: Array<{ offset: number; limit: number; clean: boolean; fields: string[] }> = [];
+    const hasDelivered = await createDefaultDatasetDeliveryReconciler({
+      openDataset: async () => ({
+        getData: async (options) => {
+          calls.push(options);
+          if (options.offset === 0) return { items: [{ id: 'already-pushed' }], count: 1, total: 2 };
+          return { items: [{ id: 'also-pushed' }], count: 1, total: 2 };
+        },
+      }),
+    });
+    await expect(hasDelivered('also-pushed')).resolves.toBe(true);
+    await expect(hasDelivered('not-pushed')).resolves.toBe(false);
+    expect(calls).toEqual([
+      { offset: 0, limit: 1_000, clean: true, fields: ['id'] },
+      { offset: 1, limit: 1_000, clean: true, fields: ['id'] },
+    ]);
+  });
+
   it('uses Actor.useState for resumable coordinator state and writes final OUTPUT metadata', async () => {
     const state: CoordinatorState = { version: 1, targets: {}, seenIds: [], statistics: { discovered: 0, filtered: 0, reserved: 0, emitted: 0, denied: 0, errors: 0 } };
     const values: Array<{ key: string; value: unknown; options?: Record<string, unknown> }> = [];

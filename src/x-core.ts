@@ -10,6 +10,7 @@ export interface StickyProxyRequestOptions {
   method?: HttpMethod;
   headers?: Record<string, string>;
   body?: string;
+  signal?: AbortSignal;
   proxyUrl: string;
   sessionToken: object;
 }
@@ -27,6 +28,7 @@ const gotProxyRequest: StickyProxyRequest = async (url, options) => {
     ...(options.method === undefined ? {} : { method: options.method }),
     ...(options.headers === undefined ? {} : { headers: options.headers }),
     ...(options.body === undefined ? {} : { body: options.body }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
     proxyUrl: options.proxyUrl,
     sessionToken: options.sessionToken,
     useHeaderGenerator: false,
@@ -45,12 +47,14 @@ export function createStickyProxyFetch(proxyUrl: string, request: StickyProxyReq
   return async (input, init) => {
     const headers = Object.fromEntries(new Headers(init?.headers).entries());
     const body = typeof init?.body === 'string' ? init.body : undefined;
+    const signal = init?.signal ?? undefined;
     const method = init?.method?.toUpperCase();
     const supportedMethod: HttpMethod | undefined = method === 'GET' || method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE' || method === 'HEAD' || method === 'OPTIONS' ? method : undefined;
     const result = await request(String(input), {
       ...(supportedMethod === undefined ? {} : { method: supportedMethod }),
       ...(Object.keys(headers).length === 0 ? {} : { headers }),
       ...(body === undefined ? {} : { body }),
+      ...(signal === undefined ? {} : { signal }),
       proxyUrl,
       sessionToken,
     });
@@ -110,11 +114,22 @@ export class RateLimitError extends Error {
   }
 }
 
+/** A public X request exceeded its per-attempt deadline and exhausted bounded retries. */
+export class RequestTimeoutError extends Error {
+  public constructor() {
+    super('X GraphQL request deadline exceeded after bounded retries');
+    this.name = 'RequestTimeoutError';
+  }
+}
+
 const DEFAULT_OPERATIONS: OperationMap = {
   UserByScreenName: 'Gb-d6r0vxPOADdG62OEBpQ',
   UserTweets: 'SXVCYB8XHSS25nzIljNtZA',
   TweetResultByRestId: 'GZsN2Pc4knAoit6pXa4HSA',
 };
+
+/** Current public guest GraphQL surface, verified as GET with encoded query JSON. */
+export const X_GRAPHQL_BASE_URL = 'https://api.x.com/graphql';
 
 function asRecord(value: unknown): JsonRecord | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : undefined;
@@ -343,32 +358,45 @@ export class OperationRegistry {
   private readonly fetcher: FetchLike;
   private readonly manifestUrl: string;
   private readonly bootstrap: OperationMap;
+  private readonly freshnessTtlMs: number;
+  private readonly now: () => number;
+  private latestCheckedAt: number | undefined;
 
-  public constructor(options: { fetch?: FetchLike; manifestUrl?: string; bootstrap?: OperationMap }) {
+  public constructor(options: { fetch?: FetchLike; manifestUrl?: string; bootstrap?: OperationMap; freshnessTtlMs?: number; now?: () => number }) {
     this.fetcher = options.fetch ?? fetch;
     this.manifestUrl = options.manifestUrl ?? 'https://x.com/manifest.js';
     this.bootstrap = options.bootstrap ?? DEFAULT_OPERATIONS;
+    this.freshnessTtlMs = Math.max(0, options.freshnessTtlMs ?? 5 * 60 * 1_000);
+    this.now = options.now ?? Date.now;
   }
 
   public invalidate(): void {
     this.cachedByBuild.clear();
     this.latest = undefined;
+    this.latestCheckedAt = undefined;
   }
 
   public async get(forceRefresh = false): Promise<DiscoverySnapshot> {
+    if (!forceRefresh && this.latest !== undefined && this.latestCheckedAt !== undefined && this.now() - this.latestCheckedAt < this.freshnessTtlMs) {
+      return this.latest;
+    }
     let manifest: string;
     try {
       const manifestResponse = await this.fetcher(this.manifestUrl, { headers: { accept: 'application/javascript,text/javascript,*/*' } });
       if (!manifestResponse.ok) throw new Error(`manifest HTTP ${manifestResponse.status}`);
       manifest = await manifestResponse.text();
     } catch {
-      return this.latest ?? { bearer: '', buildKey: null, bootstrapOperations: [...Object.keys(this.bootstrap)] as OperationName[], operations: { ...this.bootstrap }, features: {}, fieldToggles: {} };
+      const fallback = this.latest ?? { bearer: '', buildKey: null, bootstrapOperations: [...Object.keys(this.bootstrap)] as OperationName[], operations: { ...this.bootstrap }, features: {}, fieldToggles: {} };
+      this.latest = fallback;
+      this.latestCheckedAt = this.now();
+      return fallback;
     }
     const discoveredBuildKey = buildKey(manifest);
     const cacheKey = discoveredBuildKey ?? `manifest:${fingerprint(manifest)}`;
     const existing = this.cachedByBuild.get(cacheKey);
     if (!forceRefresh && existing !== undefined) {
       this.latest = existing;
+      this.latestCheckedAt = this.now();
       return existing;
     }
     const sources = [manifest];
@@ -392,6 +420,7 @@ export class OperationRegistry {
     };
     this.cachedByBuild.set(cacheKey, snapshot);
     this.latest = snapshot;
+    this.latestCheckedAt = this.now();
     return snapshot;
   }
 }
@@ -465,6 +494,7 @@ export class XGraphqlClient {
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly now: () => number;
   private readonly random: () => number;
+  private readonly requestTimeoutMs: number;
 
   public constructor(options: {
     registry: OperationRegistry;
@@ -473,6 +503,7 @@ export class XGraphqlClient {
     sleep?: (milliseconds: number) => Promise<void>;
     now?: () => number;
     random?: () => number;
+    requestTimeoutMs?: number;
   }) {
     this.registry = options.registry;
     this.session = options.session;
@@ -480,6 +511,7 @@ export class XGraphqlClient {
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
+    this.requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? 15_000);
   }
 
   public async call(operation: OperationName, variables: JsonRecord): Promise<JsonRecord> {
@@ -492,11 +524,7 @@ export class XGraphqlClient {
       const headers = await this.session.headers();
       let response: Response;
       try {
-        response = await this.fetcher(`https://api.x.com/graphql/${snapshot.operations[operation]}/${operation}`, {
-          method: 'POST',
-          headers: { ...headers, 'content-type': 'application/json', accept: 'application/json' },
-          body: JSON.stringify({ variables, features: snapshot.features, fieldToggles: snapshot.fieldToggles }),
-        });
+        response = await this.request(operation, snapshot, variables, headers);
       } catch (error) {
         if (transientAttempts >= 2) throw error;
         transientAttempts += 1;
@@ -580,6 +608,20 @@ export class XGraphqlClient {
 
   private backoff(attempt: number): number {
     return Math.min(4_000, 250 * (2 ** (attempt - 1))) + Math.floor(this.random() * 100);
+  }
+
+  private async request(operation: OperationName, snapshot: DiscoverySnapshot, variables: JsonRecord, headers: Record<string, string>): Promise<Response> {
+    const url = new URL(`${X_GRAPHQL_BASE_URL}/${snapshot.operations[operation]}/${operation}`);
+    url.searchParams.set('variables', JSON.stringify(variables));
+    url.searchParams.set('features', JSON.stringify(snapshot.features));
+    url.searchParams.set('fieldToggles', JSON.stringify(snapshot.fieldToggles));
+    const signal = AbortSignal.timeout(this.requestTimeoutMs);
+    try {
+      return await this.fetcher(url, { method: 'GET', headers: { ...headers, accept: 'application/json' }, signal });
+    } catch (error) {
+      if (signal.aborted) throw new RequestTimeoutError();
+      throw error;
+    }
   }
 }
 
@@ -758,8 +800,13 @@ function sourceLabel(source: unknown): string | null {
 }
 
 function decodeHtmlEntities(text: string): string {
-  const named: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: '\u00a0' };
-  return text.replace(/&(#x[\da-f]+|#\d+|amp|quot|apos|lt|gt|nbsp);/gi, (entity, token: string) => {
+  const named: Record<string, string> = {
+    amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: '\u00a0',
+    copy: '©', reg: '®', trade: '™', hellip: '…', ndash: '–', mdash: '—',
+    lsquo: '‘', rsquo: '’', sbquo: '‚', ldquo: '“', rdquo: '”', bdquo: '„',
+    laquo: '«', raquo: '»', middot: '·', bull: '•', euro: '€', pound: '£', yen: '¥',
+  };
+  return text.replace(/&(#x[\da-f]+|#\d+|[a-z][a-z0-9]+);/gi, (entity, token: string) => {
     const lower = token.toLowerCase();
     if (lower in named) return named[lower] ?? entity;
     const number = lower.startsWith('#x') ? Number.parseInt(lower.slice(2), 16) : Number.parseInt(lower.slice(1), 10);
@@ -782,10 +829,11 @@ export function normalizeTweet(raw: unknown, scrapedAt = new Date().toISOString(
   if (legacy === undefined || user === undefined || author === undefined || id === undefined || username === undefined || name === undefined || authorId === undefined || created === undefined || Number.isNaN(created.valueOf())) {
     throw new GraphqlShapeError('tweet result is missing required tweet or author fields');
   }
-  const entities = asRecord(legacy.entities);
+  const noteResult = asRecord(asRecord(asRecord(legacy.note_tweet)?.note_tweet_results)?.result);
+  const entities = asRecord(noteResult?.entity_set) ?? asRecord(legacy.entities);
   const urlEntities = array(entities?.urls);
   const replacements = new Map(urlEntities.map((item) => [stringAt(item, 'url'), stringAt(item, 'expanded_url') ?? stringAt(item, 'url')]));
-  const fullText = stringAt(legacy, 'full_text') ?? stringAt(legacy, 'text') ?? '';
+  const fullText = stringAt(noteResult, 'text') ?? stringAt(legacy, 'full_text') ?? stringAt(legacy, 'text') ?? '';
   const text = fullText.replace(/https:\/\/t\.co\/[A-Za-z0-9_-]+/g, (short) => replacements.get(short) ?? short);
   const inReplyToId = stringAt(legacy, 'in_reply_to_status_id_str') ?? null;
   const quotedTweetId = stringAt(legacy, 'quoted_status_id_str') ?? null;
@@ -806,7 +854,7 @@ export function normalizeTweet(raw: unknown, scrapedAt = new Date().toISOString(
       id: authorId,
       username,
       name,
-      verified: author.verified === true || author.is_blue_verified === true,
+      verified: author.verified === true || author.is_blue_verified === true || user.is_blue_verified === true,
       followers: integer(author.followers_count),
       following: integer(author.friends_count),
     },
