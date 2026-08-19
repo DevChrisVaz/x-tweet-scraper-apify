@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "X Tweet Scraper dataset item",
+  "$ref": "#/definitions/tweet",
+  "definitions": {
+    "nullableId": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+    "tweet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "url", "text", "lang", "createdAt", "conversationId", "isReply", "isRetweet", "isQuote", "inReplyToId", "quotedTweetId", "author", "metrics", "entities", "source", "scrapedAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "minLength": 1 },
+        "text": { "type": "string" },
+        "lang": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "conversationId": { "$ref": "#/definitions/nullableId" },
+        "isReply": { "type": "boolean" },
+        "isRetweet": { "type": "boolean" },
+        "isQuote": { "type": "boolean" },
+        "inReplyToId": { "$ref": "#/definitions/nullableId" },
+        "quotedTweetId": { "$ref": "#/definitions/nullableId" },
+        "author": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "username", "name", "verified", "followers", "following"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "username": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "verified": { "type": "boolean" },
+            "followers": { "type": "integer", "minimum": 0 },
+            "following": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["likes", "retweets", "replies", "quotes", "bookmarks", "views"],
+          "properties": {
+            "likes": { "type": "integer", "minimum": 0 },
+            "retweets": { "type": "integer", "minimum": 0 },
+            "replies": { "type": "integer", "minimum": 0 },
+            "quotes": { "type": "integer", "minimum": 0 },
+            "bookmarks": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+            "views": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] }
+          }
+        },
+        "entities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hashtags", "mentions", "urls", "media"],
+          "properties": {
+            "hashtags": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "mentions": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "urls": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "media": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "url", "thumbnail"],
+                "properties": {
+                  "type": { "type": "string", "enum": ["photo", "video", "animated_gif"] },
+                  "url": { "type": "string", "minLength": 1 },
+                  "thumbnail": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] }
+                }
+              }
+            }
+          }
+        },
+        "source": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "scrapedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

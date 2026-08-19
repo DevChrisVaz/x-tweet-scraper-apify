@@ -1,0 +1,13 @@
+{
+  "actorSpecification": 1,
+  "name": "x-tweet-scraper",
+  "title": "X Tweet Scraper",
+  "version": "0.1",
+  "build": {
+    "dockerfile": "./Dockerfile"
+  },
+  "input": "./INPUT_SCHEMA.json",
+  "storages": {
+    "dataset": "./schemas/DATASET_SCHEMA.json"
+  }
+}
