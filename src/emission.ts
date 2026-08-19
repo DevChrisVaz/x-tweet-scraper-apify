@@ -204,6 +204,28 @@ export class EmissionGuard {
     return allowed;
   }
 
+  async reserveBatch(tweetIds: string[]): Promise<Set<string>> {
+    const allowed = new Set<string>();
+    await this.enqueue(async () => {
+      const unique = [...new Set(tweetIds)];
+      if (unique.length === 0 || unique.length > 20) throw new Error('reservation batches must contain 1..20 unique IDs');
+      const pending = unique.filter((tweetId) => !this.granted.has(tweetId));
+      for (const tweetId of unique) if (this.granted.has(tweetId)) allowed.add(tweetId);
+      if (pending.length === 0) return;
+      try {
+        const response = await this.client.reserve(pending);
+        for (const decision of response.decisions) {
+          if (decision.decision !== 'grant' || !pending.includes(decision.tweetId)) continue;
+          this.granted.add(decision.tweetId);
+          allowed.add(decision.tweetId);
+        }
+      } catch {
+        // The caller receives no grant when the signer is unavailable or invalid.
+      }
+    });
+    return allowed;
+  }
+
   async canEmit(tweetId: string): Promise<boolean> {
     return this.granted.has(tweetId);
   }

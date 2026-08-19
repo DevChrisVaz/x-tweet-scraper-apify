@@ -96,6 +96,20 @@ describe('actor emission guard', () => {
     expect(await failing.canEmit('tweet-3')).toBe(false);
   });
 
+  it('records a validated reservation batch before serialized emissions', async () => {
+    const repository = new InMemoryEntitlementRepository();
+    const service = new EntitlementService(repository, { signingPrivateKey: keyPair.privateKey, signingKeyId: 'test-key', now: () => 1_700_000_000_000 });
+    await service.resolve({ subject, maxResults: 100, isPaying: false });
+    const client = new ActorEntitlementClient({
+      subject, platformIsPaying: false, maxResults: 100, hmacSecret: 'hmac-secret',
+      signer: async (request) => service.handleReservation({ subject, tweetIds: request.tweetIds }), pinnedPublicKey: publicKey, now: () => 1_700_000_000_000,
+    });
+    const guard = new EmissionGuard(client);
+    await expect(guard.reserveBatch(['tweet-1', 'tweet-2'])).resolves.toEqual(new Set(['tweet-1', 'tweet-2']));
+    expect(await guard.canEmit('tweet-1')).toBe(true);
+    expect(await guard.canEmit('tweet-2')).toBe(true);
+  });
+
   it('rejects a signed response whose subject does not match the platform identity', async () => {
     const repository = new InMemoryEntitlementRepository();
     const service = new EntitlementService(repository, { signingPrivateKey: keyPair.privateKey, signingKeyId: 'test-key', now: () => 1_700_000_000_000 });
