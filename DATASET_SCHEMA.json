@@ -2,5 +2,5 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "X Tweet Scraper dataset",
   "type": "array",
-  "items": { "$ref": "../OUTPUT_SCHEMA.json" }
+  "items": { "$ref": "./OUTPUT_SCHEMA.json" }
 }

@@ -58,7 +58,7 @@ describe('tweet output contract', () => {
         hashtags: [],
         mentions: [],
         urls: [],
-        media: [],
+        media: [{ type: 'photo', url: 'https://example.com/photo.jpg', thumbnail: null }],
       },
       source: null,
       scrapedAt: '2025-01-01T00:00:01Z',
@@ -71,6 +71,32 @@ describe('tweet output contract', () => {
     expect(tweet.metrics.bookmarks).toBeNull();
     expect(tweet.metrics.views).toBeNull();
     expect(tweet.source).toBeNull();
-    expect(() => TweetOutputSchema.parse({ ...tweet, source: undefined })).toThrow();
+    expect(tweet.entities.media[0]?.thumbnail).toBeNull();
+
+    const nullableTopLevel = [
+      'lang',
+      'conversationId',
+      'inReplyToId',
+      'quotedTweetId',
+      'source',
+    ];
+    for (const field of nullableTopLevel) {
+      const missing = { ...tweet } as Record<string, unknown>;
+      delete missing[field];
+      expect(() => TweetOutputSchema.parse(missing), `missing nullable field ${field}`).toThrow();
+    }
+
+    for (const field of ['bookmarks', 'views']) {
+      const metrics = { ...tweet.metrics } as Record<string, unknown>;
+      delete metrics[field];
+      expect(() => TweetOutputSchema.parse({ ...tweet, metrics }), `missing nullable metric ${field}`).toThrow();
+    }
+
+    const media = { ...tweet.entities.media[0] } as Record<string, unknown>;
+    delete media.thumbnail;
+    expect(
+      () => TweetOutputSchema.parse({ ...tweet, entities: { ...tweet.entities, media: [media] } }),
+      'missing nullable media thumbnail',
+    ).toThrow();
   });
 });

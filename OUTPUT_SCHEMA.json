@@ -13,7 +13,7 @@
         "url": { "type": "string", "minLength": 1 },
         "text": { "type": "string" },
         "lang": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
-        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$" },
         "conversationId": { "$ref": "#/definitions/nullableId" },
         "isReply": { "type": "boolean" },
         "isRetweet": { "type": "boolean" },
@@ -70,7 +70,7 @@
           }
         },
         "source": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
-        "scrapedAt": { "type": "string", "format": "date-time" }
+        "scrapedAt": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$" }
       }
     }
   }
