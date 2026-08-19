@@ -12,7 +12,15 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "check:browser": "node scripts/check-browser-deps.mjs",
+    "validate:packaging": "node scripts/validate-packaging.mjs",
+    "docker:build": "docker build --tag x-tweet-scraper-apify:local .",
+    "fixture:run": "npm run build && node scripts/fixture-run.mjs",
+    "signer:smoke": "npm run build && node scripts/signer-smoke.mjs",
+    "smoke:live": "npm run build && node scripts/live-smoke.mjs",
+    "benchmark:live": "npm run build && node scripts/benchmark.mjs",
+    "verify": "npm run check:browser && npm run validate:packaging && npm run lint && npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "apify": "^3.5.2",
@@ -22,6 +30,7 @@
   "devDependencies": {
     "@eslint/js": "^9.31.0",
     "@types/node": "^24.0.0",
+    "ajv": "^6.15.0",
     "eslint": "^9.31.0",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.37.0",

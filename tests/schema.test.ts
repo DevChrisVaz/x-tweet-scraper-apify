@@ -24,10 +24,12 @@ const completeTweet = {
 };
 
 describe('output JSON schema', () => {
-  it('rejects offset timestamps and accepts UTC Z timestamps', () => {
+  it('independently enforces UTC-Z timestamps for createdAt and scrapedAt', () => {
     const validate = new Ajv().compile(outputSchema);
 
     expect(validate(completeTweet)).toBe(true);
     expect(validate({ ...completeTweet, createdAt: '2025-01-01T00:00:00+05:00' })).toBe(false);
+    expect(validate({ ...completeTweet, scrapedAt: '2025-01-01T00:00:01+05:00' })).toBe(false);
+    expect(validate({ ...completeTweet, scrapedAt: '2025-01-01T00:00:01.123Z' })).toBe(true);
   });
 });
