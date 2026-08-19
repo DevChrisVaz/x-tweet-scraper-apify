@@ -141,6 +141,8 @@ export const EntitlementResolutionSchema = z
     effectiveLimit: z.number().int().min(0).max(10_000),
     expiresAt: utcTimestamp,
     issuedAt: utcTimestamp,
+    signature: nonEmptyString,
+    keyId: nonEmptyString,
   })
   .strict();
 
