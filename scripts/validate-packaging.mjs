@@ -17,9 +17,15 @@ if (!dockerfile.includes('npm prune --omit=dev')) fail('Dockerfile must prune de
 if (!dockerfile.includes('CMD ["node", "dist/index.js"]')) fail('Dockerfile must start the compiled Actor');
 
 const actor = json('.actor/actor.json');
-if (actor.build?.dockerfile !== '../Dockerfile') fail('Apify manifest must point at the production Dockerfile');
-for (const path of [actor.input, actor.storages?.dataset]) {
-  if (typeof path !== 'string' || !text(`.actor/${path.replace(/^\.\//, '')}`)) fail('Apify manifest references a missing schema');
+if (actor.dockerfile !== '../Dockerfile') fail('Apify manifest must use the supported top-level dockerfile field');
+if (Object.prototype.hasOwnProperty.call(actor, 'build')) fail('Apify manifest must not use the obsolete nested build field');
+for (const [label, path] of [['Dockerfile', actor.dockerfile], ['input schema', actor.input], ['dataset schema', actor.storages?.dataset]]) {
+  if (typeof path !== 'string') fail(`Apify manifest is missing its ${label} path`);
+  try {
+    readFileSync(new URL(`.actor/${path.replace(/^\.\//, '')}`, root));
+  } catch {
+    fail(`Apify manifest references a missing ${label}`);
+  }
 }
 
 const vercel = json('vercel.json');

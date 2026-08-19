@@ -60,7 +60,14 @@ The live commands are opt-in and HTTP-only. They require explicit targets and co
 
 The production Actor is built by Dockerfile from Node 24 and starts dist/index.js. .actor/actor.json points to that Dockerfile and the checked-in input/dataset schemas. The Vercel Functions in api/entitlements/ are configured in vercel.json for nodejs24.x and Fluid Compute-compatible Node execution; they are not Edge Functions.
 
-The signer is deployed as the Vercel project x-tweet-scraper-entitlements and uses the already provisioned Marketplace resource upstash-kv-cordovan-village. Connect that resource to the project and configure the names in .env.example through the Vercel dashboard or CLI. The example contains names and harmless placeholders only; private keys, HMACs, REST tokens, and .env.local values must never be committed or printed. The Actor receives only its endpoint, HMAC, and pinned public key through the deployment secret mechanism; payer status continues to come from Apify runtime identity.
+The intended/provisioned names are Vercel project x-tweet-scraper-entitlements and Marketplace resource upstash-kv-cordovan-village. Connection of that resource, secret configuration, Vercel deployment, and Apify deployment remain Task 6 actions; this worktree makes no deployment claim. The example contains names and harmless placeholders only; private keys, HMACs, REST tokens, and .env.local values must never be committed or printed. The Actor receives only its endpoint, HMAC, and pinned public key through the deployment secret mechanism; payer status continues to come from Apify runtime identity.
+
+Task 6 operator checklist (authenticated operator only; not executed here):
+
+1. In the Vercel dashboard, confirm project x-tweet-scraper-entitlements and attach the existing resource upstash-kv-cordovan-village; do not create a second Redis resource.
+2. Link locally with `vercel link --project x-tweet-scraper-entitlements`, pull only to an ignored file with `vercel env pull .env.local`, and configure the names from .env.example through the dashboard or interactive CLI without placing secret values in commands, logs, or commits.
+3. Run `npm ci`, `npm run verify`, and `npm run docker:build` where Docker is available; inspect the generated deployment configuration.
+4. After reviewing the pinned public key and canonical actor binding, an authorized operator may run `vercel deploy --prod` and the normal Apify Actor release command (`apify push`). These commands were not run for Task 5.
 
 CI runs clean npm ci, browser-engine policy, packaging validation, lint, strict typecheck, the complete Vitest suite, build, and a Docker build on Node 24. The workflow does not publish or deploy. A deployment gate should run these checks again and verify the configured signer public key and actor binding before accepting traffic.
 

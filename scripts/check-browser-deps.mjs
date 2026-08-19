@@ -1,9 +1,29 @@
 import { readFileSync } from 'node:fs';
 
 const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
-const packages = Object.keys(lock.packages ?? {});
-const prohibited = /(^|\/)(@playwright\/|playwright(?:-core)?|@puppeteer\/|puppeteer(?:-core)?|selenium-webdriver|cypress|chromium(?:-|$)|browserless)(\/|$)/i;
-const found = packages.filter((name) => prohibited.test(name.replace(/^node_modules\//, '')));
+const packages = process.argv.slice(2).length > 0 ? process.argv.slice(2) : Object.keys(lock.packages ?? {});
+const prohibited = [
+  /^@playwright\//i,
+  /^playwright(?:$|-)/i,
+  /^@puppeteer\//i,
+  /^puppeteer(?:$|-)/i,
+  /^@sparticuz\/chromium(?:$|-)/i,
+  /^chrome-aws-lambda(?:$|-)/i,
+  /^chrome-launcher(?:$|-)/i,
+  /^chrome-remote-interface(?:$|-)/i,
+  /^chromium(?:$|-)/i,
+  /^webdriver(?:io)?(?:$|-)/i,
+  /^@wdio\//i,
+  /^selenium(?:$|-)/i,
+  /^@selenium\//i,
+  /^cypress(?:$|-)/i,
+  /^@cypress\//i,
+  /^browserless(?:$|-)/i,
+  /^@browserless\//i,
+  /^nightwatch(?:$|-)/i,
+  /^testcafe(?:$|-)/i,
+];
+const found = packages.filter((name) => prohibited.some((pattern) => pattern.test(name.replace(/^node_modules\//, ''))));
 
 if (found.length > 0) {
   console.error(`Browser-engine dependencies are prohibited: ${found.join(', ')}`);
