@@ -327,6 +327,90 @@ describe('actor coordinator integration', () => {
     expect(pushed).toHaveLength(1);
   });
 
+  it('terminally reconciles ungranted concurrent-page candidates before either cursor advances at the final slot', async () => {
+    const storage = memoryState();
+    const pushed: TweetOutput[] = [];
+    let pagesFetched = 0;
+    let releaseReservation: (() => void) | undefined;
+    const bothPagesFetched = new Promise<void>((resolve) => { releaseReservation = resolve; });
+    const sourceFactory = async () => ({
+      userByScreenName: async (username: string) => ({ rest_id: username }),
+      userTweets: async (userId: string) => {
+        pagesFetched += 1;
+        if (pagesFetched === 2) releaseReservation?.();
+        return { tweets: [rawTweet(`${userId}-tweet`)], bottomCursor: `${userId}-next` };
+      },
+      tweetById: async () => rawTweet('unused'),
+    });
+    const emission = {
+      reserveBatch: async (ids: string[]) => { await bothPagesFetched; return { grantedIds: new Set(ids), deniedIds: new Set<string>() }; },
+      emit: async (_id: string, push: () => Promise<void>) => { await push(); return true; },
+    };
+    await runCoordinator({
+      input: { fromUsers: ['a', 'b'], maxResults: 10 }, subject, sourceFactory,
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 1 }) }, emission,
+      persistence: storage.persistence, pushData: async (tweet) => { pushed.push(tweet); }, now: () => '2025-01-02T00:00:00.000Z', concurrency: 2,
+    });
+    expect(pushed).toHaveLength(1);
+    expect(storage.state).toMatchObject({ statistics: { reserved: 1, emitted: 1, denied: 1 }, pending: {} });
+    expect(storage.state?.seenIds).toEqual(expect.arrayContaining(['a-tweet', 'b-tweet']));
+
+    await runCoordinator({
+      input: { fromUsers: ['a', 'b'], maxResults: 10 }, subject, sourceFactory,
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 1 }) }, emission,
+      persistence: storage.persistence, pushData: async (tweet) => { pushed.push(tweet); }, now: () => '2025-01-02T00:00:00.000Z', concurrency: 2,
+    });
+    expect(pushed).toHaveLength(1);
+  });
+
+  it('replays a cursor captured during an in-flight request after migration', async () => {
+    const initial: CoordinatorState = {
+      version: 1,
+      targets: { 'author:a': { cursor: 'resume-cursor', exhausted: false, visitedCursors: [] } },
+      seenIds: [],
+      statistics: { discovered: 0, filtered: 0, reserved: 0, emitted: 0, denied: 0, errors: 0 },
+      pending: {},
+    };
+    let live = structuredClone(initial);
+    let snapshot: CoordinatorState | undefined;
+    const firstPersistence = {
+      load: async () => live,
+      save: async (next: CoordinatorState) => { live = structuredClone(next); },
+      writeOutput: async () => undefined,
+    };
+    const interruptedSource = async () => ({
+      userByScreenName: async () => ({ rest_id: 'a' }),
+      userTweets: async () => {
+        snapshot = structuredClone(live);
+        throw new Error('migration interrupted request');
+      },
+      tweetById: async () => rawTweet('unused'),
+    });
+    await runCoordinator({
+      input: { fromUsers: ['a'], maxResults: 10 }, subject, sourceFactory: interruptedSource,
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 10 }) }, emission: emitter(10).boundary,
+      persistence: firstPersistence, pushData: async () => undefined, now: () => '2025-01-02T00:00:00.000Z',
+    });
+
+    let calls = 0;
+    const resumedPersistence = memoryState(snapshot);
+    const resumedSource = async () => ({
+      userByScreenName: async () => ({ rest_id: 'a' }),
+      userTweets: async (_userId: string, cursor?: string) => {
+        calls += 1;
+        expect(cursor).toBe('resume-cursor');
+        return { tweets: [], bottomCursor: null };
+      },
+      tweetById: async () => rawTweet('unused'),
+    });
+    await runCoordinator({
+      input: { fromUsers: ['a'], maxResults: 10 }, subject, sourceFactory: resumedSource,
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 10 }) }, emission: emitter(10).boundary,
+      persistence: resumedPersistence.persistence, pushData: async () => undefined, now: () => '2025-01-02T00:00:00.000Z',
+    });
+    expect(calls).toBe(1);
+  });
+
   it('isolates target failures, rejects invalid output, fails closed on signer outage, and always writes OUTPUT', async () => {
     const pushed: TweetOutput[] = [];
     const storage = memoryState();

@@ -209,6 +209,16 @@ export async function runCoordinator(options: CoordinatorOptions): Promise<Outpu
       if (denied) state.statistics.denied += 1;
     };
 
+    const reconcileUnreconciled = async (): Promise<void> => {
+      let reconciled = false;
+      for (const [tweetId, item] of Object.entries(pendingState(state))) {
+        if (item.granted) continue;
+        completeTerminal(tweetId, true);
+        reconciled = true;
+      }
+      if (reconciled) await persistSafely();
+    };
+
     const validateReservation = (outcome: ReservationOutcome, requested: string[]): void => {
       const requestedIds = new Set(requested);
       for (const tweetId of outcome.grantedIds) if (!requestedIds.has(tweetId)) throw new Error('reservation granted an unrequested tweet ID');
@@ -246,12 +256,18 @@ export async function runCoordinator(options: CoordinatorOptions): Promise<Outpu
         const result = await pushGranted(tweetId, item);
         if (result.unavailable) return result;
       }
-      if (remoteExhausted || signerUnavailable) return { unavailable: signerUnavailable };
+      if (remoteExhausted || signerUnavailable) {
+        if (remoteExhausted) await reconcileUnreconciled();
+        return { unavailable: signerUnavailable };
+      }
       while (!sourceDone()) {
         const candidates = Object.entries(pendingState(state)).filter(([, item]) => !item.granted);
         if (candidates.length === 0) return { unavailable: false };
         const capacity = Math.min(20, desiredLimit - state.statistics.emitted, effectiveLimit - state.statistics.reserved);
-        if (capacity <= 0) return { unavailable: false };
+        if (capacity <= 0) {
+          await reconcileUnreconciled();
+          return { unavailable: false };
+        }
         const batch = candidates.slice(0, capacity);
         const tweetIds = batch.map(([tweetId]) => tweetId);
         let outcome: ReservationOutcome;
@@ -275,8 +291,12 @@ export async function runCoordinator(options: CoordinatorOptions): Promise<Outpu
           const result = await pushGranted(tweetId, item);
           if (result.unavailable) return result;
         }
-        if (remoteExhausted) return { unavailable: false };
+        if (remoteExhausted) {
+          await reconcileUnreconciled();
+          return { unavailable: false };
+        }
       }
+      if (state.statistics.reserved >= effectiveLimit || state.statistics.emitted >= desiredLimit) await reconcileUnreconciled();
       return { unavailable: signerUnavailable };
     };
 
@@ -331,9 +351,9 @@ export async function runCoordinator(options: CoordinatorOptions): Promise<Outpu
             await persistSafely();
             return;
           }
-          progress.visitedCursors?.push(requestCursor);
         }
         const page = await client.userTweets(userId, requestCursor ?? undefined);
+        if (requestCursor !== null) progress.visitedCursors?.push(requestCursor);
         const normalized = candidatesFrom(page.tweets);
         const drained = await drainPending();
         if (drained.unavailable) {
