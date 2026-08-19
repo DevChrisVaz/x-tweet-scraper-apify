@@ -1,8 +1,7 @@
 import { createHmac, generateKeyPairSync } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createEntitlementHandlers } from '../src/entitlement-http.js';
-import { ActorEntitlementClient } from '../src/emission.js';
-import { platformEntitlementIdentity, subjectFromActorEnv } from '../src/emission.js';
+import { ActorEntitlementClient, createPlatformEntitlementClient, payingFromActorEnv, platformEntitlementIdentity, subjectFromActorEnv } from '../src/emission.js';
 import {
   EntitlementService,
   InMemoryEntitlementRepository,
@@ -14,6 +13,8 @@ import {
 const keyPair = generateKeyPairSync('ed25519');
 const publicKey = keyPair.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
 const endpoint = 'https://entitlements.example.test';
+
+vi.mock('apify', () => ({ Actor: { getEnv: () => ({ actorId: 'actor-1', actorRunId: 'run-sdk-paid', userId: 'user-sdk-paid', userIsPaying: '1' }) } }));
 
 function routeFetcher(handlers: ReturnType<typeof createEntitlementHandlers>) {
   return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -42,9 +43,16 @@ function createHandlers() {
 
 describe('Actor HTTP to Vercel entitlement path', () => {
   it('uses only the Apify runtime user and payer fields, never a caller-style user override', () => {
-    const identity = platformEntitlementIdentity({ actorId: 'actor-1', actorRunId: 'run-1', userId: 'runtime-user', APIFY_USER_ID: 'caller-user', APIFY_USER_IS_PAYING: true });
+    const identity = platformEntitlementIdentity({ actorId: 'actor-1', actorRunId: 'run-1', userId: 'runtime-user', APIFY_USER_ID: 'caller-user', userIsPaying: '1' });
     expect(identity).toEqual({ subject: { actorId: 'actor-1', runId: 'run-1', userId: 'runtime-user' }, isPaying: true });
     expect(() => subjectFromActorEnv({ actorId: 'actor-1', actorRunId: 'run-1', APIFY_USER_ID: 'caller-user' })).toThrow(/identity/i);
+    expect(payingFromActorEnv({ userIsPaying: 'unrecognized' })).toBe(false);
+  });
+
+  it('creates a paid client from the real ApifyEnv shape and resolves the requested cap', async () => {
+    const { handlers } = createHandlers();
+    const client = await createPlatformEntitlementClient({ maxResults: 100, hmacSecret: 'hmac-secret', endpoint, fetcher: routeFetcher(handlers), pinnedPublicKey: publicKey, now: () => 1_700_000_000_000 });
+    expect((await client.resolve()).effectiveLimit).toBe(100);
   });
 
   it('resolves trusted payer identity then reserves through the concrete HTTP client', async () => {

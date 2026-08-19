@@ -34,6 +34,13 @@ export interface ActorEntitlementClientOptions {
   now?: () => number;
 }
 
+export interface PlatformApifyEnv {
+  actorId?: string;
+  actorRunId?: string;
+  userId?: string;
+  userIsPaying?: string;
+}
+
 export async function createPlatformEntitlementClient(options: Omit<ActorEntitlementClientOptions, 'subject' | 'platformIsPaying'>): Promise<ActorEntitlementClient> {
   const { Actor } = await import('apify');
   const env = Actor.getEnv() as unknown as Record<string, unknown>;
@@ -50,8 +57,7 @@ export function subjectFromActorEnv(env: Record<string, unknown>): EntitlementSu
 }
 
 export function payingFromActorEnv(env: Record<string, unknown>): boolean {
-  const value = env.APIFY_USER_IS_PAYING;
-  return value === true || value === 'true' || value === '1';
+  return env.userIsPaying === '1';
 }
 
 export function platformEntitlementIdentity(env: Record<string, unknown>): { subject: EntitlementSubject; isPaying: boolean } {
