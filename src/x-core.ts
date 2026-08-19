@@ -68,6 +68,8 @@ type JsonRecord = Record<string, unknown>;
 
 export interface DiscoverySnapshot {
   bearer: string;
+  buildKey: string | null;
+  bootstrapOperations: OperationName[];
   operations: OperationMap;
   features: JsonRecord;
   fieldToggles: JsonRecord;
@@ -91,6 +93,20 @@ export class GraphqlShapeError extends Error {
   public constructor(message: string) {
     super(message);
     this.name = 'GraphqlShapeError';
+  }
+}
+
+export class GraphqlResponseError extends Error {
+  public constructor(message: string) {
+    super(`X GraphQL returned an error: ${message}`);
+    this.name = 'GraphqlResponseError';
+  }
+}
+
+export class RateLimitError extends Error {
+  public constructor() {
+    super('X rate limit persisted after bounded retries');
+    this.name = 'RateLimitError';
   }
 }
 
@@ -119,15 +135,68 @@ function parseObjectLiteral(source: string, key: string): JsonRecord {
   }
 }
 
+function bundleText(source: string): string {
+  return source.replace(/\\u0022|\\x22|\\"/g, '"').replace(/\\u0027|\\x27|\\'/g, "'");
+}
+
+function objectBlocks(source: string): string[] {
+  const blocks: string[] = [];
+  let start = -1;
+  let depth = 0;
+  let quote: string | undefined;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === undefined) continue;
+    if (quote !== undefined) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+    } else if (character === '}' && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) blocks.push(source.slice(start, index + 1));
+    }
+  }
+  return blocks;
+}
+
+function metadataValue(block: string, key: 'queryId' | 'operationName'): string | undefined {
+  const escapedKey = key.replace(/[A-Z]/g, (character) => `[${character.toLowerCase()}${character}]`);
+  const match = block.match(new RegExp(`(?:["']${escapedKey}["']|${escapedKey})\\s*:\\s*["']([^"']+)["']`));
+  return match?.[1];
+}
+
 function extractOperationPairs(source: string): Partial<OperationMap> {
   const found: Partial<OperationMap> = {};
-  const pattern = /["']queryId["']\s*:\s*["']([^"']+)["'][\s\S]{0,400}?["']operationName["']\s*:\s*["'](UserByScreenName|UserTweets|TweetResultByRestId)["']|["']operationName["']\s*:\s*["'](UserByScreenName|UserTweets|TweetResultByRestId)["'][\s\S]{0,400}?["']queryId["']\s*:\s*["']([^"']+)["']/g;
-  for (const match of source.matchAll(pattern)) {
+  const normalized = bundleText(source);
+  for (const block of objectBlocks(normalized)) {
+    const operation = metadataValue(block, 'operationName') as OperationName | undefined;
+    const queryId = metadataValue(block, 'queryId');
+    if ((operation === 'UserByScreenName' || operation === 'UserTweets' || operation === 'TweetResultByRestId') && queryId !== undefined) {
+      found[operation] = queryId;
+    }
+  }
+  const pair = /(?:["']?queryId["']?\s*:\s*["']([^"']+)["'][\s\S]{0,20000}?["']?operationName["']?\s*:\s*["'](UserByScreenName|UserTweets|TweetResultByRestId)["']|["']?operationName["']?\s*:\s*["'](UserByScreenName|UserTweets|TweetResultByRestId)["'][\s\S]{0,20000}?["']?queryId["']?\s*:\s*["']([^"']+)["'])/g;
+  for (const match of normalized.matchAll(pair)) {
     const operation = (match[2] ?? match[3]) as OperationName | undefined;
     const queryId = match[1] ?? match[4];
     if (operation !== undefined && queryId !== undefined) found[operation] = queryId;
   }
   return found;
+}
+
+function buildKey(source: string): string | null {
+  const match = bundleText(source).match(/(?:["'](?:buildId|build_id|build|version|hash)["']|\b(?:buildId|build_id|build|version|hash)\b)\s*[:=]\s*["']([^"']+)["']/);
+  return match?.[1] ?? null;
 }
 
 function assetUrls(manifest: string, manifestUrl: string): string[] {
@@ -160,29 +229,35 @@ export class OperationRegistry {
     this.cached = undefined;
   }
 
-  public async get(): Promise<DiscoverySnapshot> {
-    if (this.cached !== undefined) return this.cached;
+  public async get(forceRefresh = false): Promise<DiscoverySnapshot> {
+    if (!forceRefresh && this.cached !== undefined) return this.cached;
+    let manifest: string;
     try {
       const manifestResponse = await this.fetcher(this.manifestUrl, { headers: { accept: 'application/javascript,text/javascript,*/*' } });
       if (!manifestResponse.ok) throw new Error(`manifest HTTP ${manifestResponse.status}`);
-      const manifest = await manifestResponse.text();
-      const sources = [manifest];
-      for (const url of assetUrls(manifest, this.manifestUrl)) {
+      manifest = await manifestResponse.text();
+    } catch {
+      return { bearer: '', buildKey: null, bootstrapOperations: [...Object.keys(this.bootstrap)] as OperationName[], operations: { ...this.bootstrap }, features: {}, fieldToggles: {} };
+    }
+    const sources = [manifest];
+    for (const url of assetUrls(manifest, this.manifestUrl)) {
+      try {
         const bundle = await this.fetcher(url, { headers: { accept: 'application/javascript,text/javascript,*/*' } });
         if (bundle.ok) sources.push(await bundle.text());
+      } catch {
+        // Keep successful manifest and bundles; one flaky public asset must not erase discovery.
       }
-      const joined = sources.join('\n');
-      const bearer = joined.match(/AAAA[A-Za-z0-9_%-]{20,}/)?.[0] ?? '';
-      const discovered = extractOperationPairs(joined);
-      this.cached = {
-        bearer,
-        operations: { ...this.bootstrap, ...discovered },
-        features: parseObjectLiteral(joined, 'features'),
-        fieldToggles: parseObjectLiteral(joined, 'fieldToggles'),
-      };
-    } catch {
-      this.cached = { bearer: '', operations: { ...this.bootstrap }, features: {}, fieldToggles: {} };
     }
+    const joined = sources.join('\n');
+    const discovered = extractOperationPairs(joined);
+    this.cached = {
+      bearer: joined.match(/AAAA[A-Za-z0-9_%-]{20,}/)?.[0] ?? '',
+      buildKey: buildKey(manifest),
+      bootstrapOperations: (Object.keys(this.bootstrap) as OperationName[]).filter((operation) => discovered[operation] === undefined),
+      operations: { ...this.bootstrap, ...discovered },
+      features: parseObjectLiteral(joined, 'features'),
+      fieldToggles: parseObjectLiteral(joined, 'fieldToggles'),
+    };
     return this.cached;
   }
 }
@@ -268,6 +343,7 @@ export class XGraphqlClient {
     let driftRetried = false;
     let unauthorizedRetried = false;
     let transientAttempts = 0;
+    let rateLimitAttempts = 0;
     for (;;) {
       const snapshot = await this.registry.get();
       const headers = await this.session.headers();
@@ -299,8 +375,13 @@ export class XGraphqlClient {
       }
       if (operationDrift && driftRetried) throw new OperationDriftError(operation);
       if (response.status === 429) {
-        const reset = Number(response.headers.get('x-rate-limit-reset'));
-        const wait = Number.isFinite(reset) ? Math.max(0, reset * 1_000 - this.now()) : this.backoff(transientAttempts + 1);
+        if (rateLimitAttempts >= 3) throw new RateLimitError();
+        rateLimitAttempts += 1;
+        const resetHeader = response.headers.get('x-rate-limit-reset');
+        const reset = resetHeader === null || resetHeader.trim() === '' ? Number.NaN : Number(resetHeader);
+        const wait = Number.isFinite(reset) && reset * 1_000 > this.now()
+          ? reset * 1_000 - this.now()
+          : this.backoff(rateLimitAttempts);
         await this.sleep(wait);
         continue;
       }
@@ -312,6 +393,22 @@ export class XGraphqlClient {
       if (!response.ok) throw new GraphqlShapeError(`X GraphQL HTTP ${response.status}`);
       const body: unknown = await response.json();
       const record = asRecord(body);
+      const error = graphQlError(record?.errors);
+      if (error !== undefined) {
+        if (isQueryValidationError(error) && !driftRetried) {
+          driftRetried = true;
+          this.registry.invalidate();
+          continue;
+        }
+        if (isQueryValidationError(error)) throw new OperationDriftError(operation);
+        if (isGuestAuthorizationError(error)) {
+          if (unauthorizedRetried) throw new AccessDeniedError(401);
+          unauthorizedRetried = true;
+          await this.session.refresh();
+          continue;
+        }
+        throw new GraphqlResponseError(error);
+      }
       const data = asRecord(record?.data);
       if (data === undefined) throw new GraphqlShapeError('X GraphQL response did not contain data');
       return data;
@@ -343,6 +440,23 @@ export class XGraphqlClient {
   }
 }
 
+function graphQlError(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) throw new GraphqlShapeError('X GraphQL errors must be a non-empty array');
+  const messages = value.map(asRecord).map((error) => stringAt(error, 'message') ?? stringAt(error, 'code')).filter((message): message is string => message !== undefined);
+  if (messages.length === 0) throw new GraphqlShapeError('X GraphQL errors did not contain messages');
+  return messages.join('; ');
+}
+
+function isQueryValidationError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes('query') && (lower.includes('validation') || lower.includes('operation'));
+}
+
+function isGuestAuthorizationError(message: string): boolean {
+  return /auth|guest|unauthoriz|forbidden|denied/i.test(message);
+}
+
 async function isQueryValidationResponse(response: Response): Promise<boolean> {
   try {
     const text = (await response.clone().text()).toLowerCase();
@@ -364,20 +478,38 @@ function timelineInstructions(payload: unknown): JsonRecord[] {
   const timeline = asRecord(asRecord(user?.timeline_v2)?.timeline) ?? asRecord(asRecord(user?.timeline)?.timeline);
   const instructions = timeline?.instructions;
   if (!Array.isArray(instructions)) throw new GraphqlShapeError('X timeline response did not contain timeline instructions');
-  return instructions.map(asRecord).filter((instruction): instruction is JsonRecord => instruction !== undefined);
+  return instructions.map((instruction) => {
+    const record = asRecord(instruction);
+    if (record === undefined) throw new GraphqlShapeError('X timeline contained a malformed instruction');
+    return record;
+  });
 }
 
 function entryResults(entry: JsonRecord): JsonRecord[] {
   const content = asRecord(entry.content);
-  if (content === undefined) return [];
+  if (content === undefined) throw new GraphqlShapeError('X timeline contained an entry without content');
+  if (content.cursorType !== undefined) {
+    if (typeof content.cursorType !== 'string' || typeof content.value !== 'string') throw new GraphqlShapeError('X timeline contained a malformed cursor entry');
+    return [];
+  }
+  if (content.items !== undefined && !Array.isArray(content.items)) throw new GraphqlShapeError('X timeline module entry items must be an array');
   const items = Array.isArray(content.items) ? content.items : [content];
   const results: JsonRecord[] = [];
   for (const itemValue of items) {
     const item = asRecord(itemValue);
+    if (item === undefined) throw new GraphqlShapeError('X timeline module contained a malformed item');
     const inner = asRecord(item?.item) ?? item;
     const itemContent = asRecord(inner?.itemContent) ?? inner;
-    const result = asRecord(asRecord(itemContent?.tweet_results)?.result);
-    if (result !== undefined) results.push(result);
+    const tweetResults = asRecord(itemContent?.tweet_results);
+    if (tweetResults === undefined) {
+      if (typeof entry.entryId === 'string' && (entry.entryId.startsWith('tweet-') || entry.entryId.startsWith('module-'))) {
+        throw new GraphqlShapeError('X timeline tweet entry did not contain tweet_results');
+      }
+      continue;
+    }
+    const result = asRecord(tweetResults.result);
+    if (result === undefined) throw new GraphqlShapeError('X timeline tweet_results did not contain result');
+    results.push(result);
   }
   return results;
 }
@@ -387,10 +519,16 @@ export function extractTimelinePage(payload: unknown): TimelinePage {
   const seen = new Set<string>();
   let bottomCursor: string | null = null;
   for (const instruction of timelineInstructions(payload)) {
-    const entries = Array.isArray(instruction.entries) ? instruction.entries : [instruction.entry];
+    const entriesValue = instruction.entries;
+    const entryValue = instruction.entry;
+    if (entriesValue !== undefined && !Array.isArray(entriesValue)) throw new GraphqlShapeError('X timeline instruction entries must be an array');
+    const entries = Array.isArray(entriesValue) ? entriesValue : entryValue === undefined ? [] : [entryValue];
+    if (entries.length === 0 && (instruction.type === 'TimelineAddEntries' || instruction.type === 'TimelineReplaceEntry')) {
+      throw new GraphqlShapeError('X timeline instruction did not contain entries');
+    }
     for (const value of entries) {
       const entry = asRecord(value);
-      if (entry === undefined) continue;
+      if (entry === undefined) throw new GraphqlShapeError('X timeline instruction contained a malformed entry');
       const content = asRecord(entry.content);
       if (content?.cursorType === 'Bottom' && typeof content.value === 'string') bottomCursor = content.value;
       for (const tweet of entryResults(entry)) {
@@ -453,8 +591,18 @@ function mediaFrom(legacy: JsonRecord): TweetOutput['entities']['media'] {
 
 function sourceLabel(source: unknown): string | null {
   if (typeof source !== 'string' || source.length === 0) return null;
-  const text = source.replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').trim();
+  const text = decodeHtmlEntities(source.replace(/<[^>]*>/g, '')).trim();
   return text.length > 0 ? text : null;
+}
+
+function decodeHtmlEntities(text: string): string {
+  const named: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: '\u00a0' };
+  return text.replace(/&(#x[\da-f]+|#\d+|amp|quot|apos|lt|gt|nbsp);/gi, (entity, token: string) => {
+    const lower = token.toLowerCase();
+    if (lower in named) return named[lower] ?? entity;
+    const number = lower.startsWith('#x') ? Number.parseInt(lower.slice(2), 16) : Number.parseInt(lower.slice(1), 10);
+    return Number.isInteger(number) && number >= 0 && number <= 0x10ffff ? String.fromCodePoint(number) : entity;
+  });
 }
 
 export function normalizeTweet(raw: unknown, scrapedAt = new Date().toISOString()): TweetOutput {
@@ -476,7 +624,7 @@ export function normalizeTweet(raw: unknown, scrapedAt = new Date().toISOString(
   const urlEntities = array(entities?.urls);
   const replacements = new Map(urlEntities.map((item) => [stringAt(item, 'url'), stringAt(item, 'expanded_url') ?? stringAt(item, 'url')]));
   const fullText = stringAt(legacy, 'full_text') ?? stringAt(legacy, 'text') ?? '';
-  const text = fullText.replace(/https:\/\/t\.co\/\S+/g, (short) => replacements.get(short) ?? short);
+  const text = fullText.replace(/https:\/\/t\.co\/[A-Za-z0-9_-]+/g, (short) => replacements.get(short) ?? short);
   const inReplyToId = stringAt(legacy, 'in_reply_to_status_id_str') ?? null;
   const quotedTweetId = stringAt(legacy, 'quoted_status_id_str') ?? null;
   const isRetweet = asRecord(legacy.retweeted_status_result) !== undefined || fullText.startsWith('RT @');
@@ -539,6 +687,7 @@ export interface TweetFilters {
   minLikes?: number;
   minRetweets?: number;
   minReplies?: number;
+  hashtags?: string[];
 }
 
 function boundary(value: string, end: boolean): number {
@@ -549,10 +698,11 @@ function boundary(value: string, end: boolean): number {
 export function applyTweetFilters(tweets: TweetOutput[], filters: TweetFilters): TweetOutput[] {
   const since = filters.since === undefined ? undefined : boundary(filters.since, false);
   const until = filters.until === undefined ? undefined : boundary(filters.until, true);
+  const requiredHashtags = (filters.hashtags ?? []).map((tag) => tag.replace(/^#/, '').toLowerCase()).filter((tag) => tag.length > 0);
   return tweets.filter((tweet) => {
     const created = Date.parse(tweet.createdAt);
     if (filters.includeReplies === false && tweet.isReply) return false;
-    if (filters.includeRetweets === false && tweet.isRetweet) return false;
+    if (filters.includeRetweets !== true && tweet.isRetweet) return false;
     if (filters.onlyVerified === true && !tweet.author.verified) return false;
     if (filters.language !== undefined && tweet.lang?.toLowerCase() !== filters.language.toLowerCase()) return false;
     if (since !== undefined && created < since) return false;
@@ -560,6 +710,8 @@ export function applyTweetFilters(tweets: TweetOutput[], filters: TweetFilters):
     if (filters.minLikes !== undefined && tweet.metrics.likes < filters.minLikes) return false;
     if (filters.minRetweets !== undefined && tweet.metrics.retweets < filters.minRetweets) return false;
     if (filters.minReplies !== undefined && tweet.metrics.replies < filters.minReplies) return false;
+    const availableHashtags = new Set(tweet.entities.hashtags.map((tag) => tag.toLowerCase()));
+    if (!requiredHashtags.every((tag) => availableHashtags.has(tag))) return false;
     const mediaType = filters.mediaType ?? 'any';
     if (mediaType === 'text_only' && (tweet.entities.media.length > 0 || tweet.entities.urls.length > 0)) return false;
     if (mediaType === 'images' && !tweet.entities.media.some((media) => media.type === 'photo')) return false;

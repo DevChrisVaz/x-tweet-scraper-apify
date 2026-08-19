@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   AccessDeniedError,
   GuestSession,
+  GraphqlResponseError,
   OperationDriftError,
   OperationRegistry,
+  RateLimitError,
   XGraphqlClient,
   applyTweetFilters,
   createStickyProxyFetch,
@@ -89,6 +91,33 @@ describe('operation discovery and caching', () => {
     });
     expect((await registry.get()).operations).toEqual(operations);
   });
+
+  it('retains usable partial discovery when one public asset fails and records the build key', async () => {
+    const registry = new OperationRegistry({
+      bootstrap: operations,
+      manifestUrl: 'https://x.com/manifest.js',
+      fetch: queuedFetch([
+        new Response('"/assets/a.js" "/assets/b.js" buildId:"web-2026" AAAAAAAAAAAAANRILgAAAAAAbearer-token {queryId:"current-user",operationName:"UserByScreenName"}', { status: 200 }),
+        new Response('{queryId:"current-timeline",operationName:"UserTweets"}', { status: 200 }),
+        new Error('temporary bundle timeout'),
+      ], []),
+    });
+    await expect(registry.get()).resolves.toMatchObject({
+      bearer: 'AAAAAAAAAAAAANRILgAAAAAAbearer-token',
+      buildKey: 'web-2026',
+      bootstrapOperations: ['TweetResultByRestId'],
+      operations: { UserByScreenName: 'current-user', UserTweets: 'current-timeline', TweetResultByRestId: operations.TweetResultByRestId },
+    });
+  });
+
+  it('discovers unquoted operation metadata even when fields are separated by minified payload data', async () => {
+    const padding = 'x'.repeat(1_000);
+    const registry = new OperationRegistry({
+      bootstrap: operations,
+      fetch: async () => new Response(`{queryId:"fresh-user",${padding},operationName:"UserByScreenName"}{operationName:"UserTweets",queryId:"fresh-timeline"}{queryId:"fresh-tweet",operationName:"TweetResultByRestId"}`, { status: 200 }),
+    });
+    await expect(registry.get()).resolves.toMatchObject({ operations: { UserByScreenName: 'fresh-user', UserTweets: 'fresh-timeline', TweetResultByRestId: 'fresh-tweet' } });
+  });
 });
 
 describe('guest HTTP transport', () => {
@@ -148,6 +177,39 @@ describe('guest HTTP transport', () => {
     expect(calls.map((call) => call.url)).toEqual(['https://api.x.com/graphql/old/UserTweets', 'https://api.x.com/graphql/new/UserTweets']);
   });
 
+  it('refreshes once for a successful HTTP response carrying GraphQL query validation errors', async () => {
+    let queryId = 'old';
+    const registry = {
+      get: async () => ({ bearer: 'b', operations: { ...operations, UserTweets: queryId }, features: {}, fieldToggles: {}, buildKey: null }),
+      invalidate: () => { queryId = 'new'; },
+    } as unknown as OperationRegistry;
+    const session = { headers: async () => ({}), refresh: async () => undefined } as unknown as GuestSession;
+    const client = new XGraphqlClient({ registry, session, fetch: queuedFetch([
+      response(200, { data: { partial: true }, errors: [{ message: 'Query validation failed for operation' }] }),
+      response(200, { data: { complete: true } }),
+    ], []), sleep: async () => undefined });
+    await expect(client.call('UserTweets', {})).resolves.toEqual({ complete: true });
+  });
+
+  it('does not return partial data when GraphQL reports a non-retryable error', async () => {
+    const registry = { get: async () => ({ bearer: 'b', operations, features: {}, fieldToggles: {}, buildKey: null }), invalidate: () => undefined } as unknown as OperationRegistry;
+    const session = { headers: async () => ({}), refresh: async () => undefined } as unknown as GuestSession;
+    const client = new XGraphqlClient({ registry, session, fetch: queuedFetch([response(200, { data: { partial: true }, errors: [{ message: 'internal resolver failure' }] })], []), sleep: async () => undefined });
+    await expect(client.call('UserTweets', {})).rejects.toBeInstanceOf(GraphqlResponseError);
+  });
+
+  it('uses the same-session refresh once for GraphQL guest authorization errors', async () => {
+    let refreshes = 0;
+    const registry = { get: async () => ({ bearer: 'b', operations, features: {}, fieldToggles: {}, buildKey: null }), invalidate: () => undefined } as unknown as OperationRegistry;
+    const session = { headers: async () => ({}), refresh: async () => { refreshes += 1; } } as unknown as GuestSession;
+    const client = new XGraphqlClient({ registry, session, fetch: queuedFetch([
+      response(200, { errors: [{ message: 'Guest token is invalid' }] }),
+      response(200, { errors: [{ message: 'Guest token is invalid' }] }),
+    ], []), sleep: async () => undefined });
+    await expect(client.call('UserTweets', {})).rejects.toBeInstanceOf(AccessDeniedError);
+    expect(refreshes).toBe(1);
+  });
+
   it('activates a guest token and retries a 401 once in the same session', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const registry = { get: async () => ({ bearer: 'b', operations, features: {}, fieldToggles: {} }), invalidate: () => undefined } as unknown as OperationRegistry;
@@ -177,6 +239,17 @@ describe('guest HTTP transport', () => {
     expect(waits).toEqual([2_000]);
     const denied = new XGraphqlClient({ registry, session, fetch: queuedFetch([response(403, {})], []), sleep: async () => undefined });
     await expect(denied.call('UserTweets', {})).rejects.toBeInstanceOf(AccessDeniedError);
+  });
+
+  it('backs off without a reset header and terminates repeated rate limits', async () => {
+    const registry = { get: async () => ({ bearer: 'b', operations, features: {}, fieldToggles: {}, buildKey: null }), invalidate: () => undefined } as unknown as OperationRegistry;
+    const session = { headers: async () => ({}), refresh: async () => undefined } as unknown as GuestSession;
+    const waits: number[] = [];
+    const recovered = new XGraphqlClient({ registry, session, fetch: queuedFetch([response(429, {}), response(200, { data: { ok: true } })], []), sleep: async (ms) => { waits.push(ms); }, random: () => 0 });
+    await expect(recovered.call('UserTweets', {})).resolves.toEqual({ ok: true });
+    expect(waits).toEqual([250]);
+    const exhausted = new XGraphqlClient({ registry, session, fetch: queuedFetch([response(429, {}), response(429, {}), response(429, {}), response(429, {})], []), sleep: async () => undefined, random: () => 0 });
+    await expect(exhausted.call('UserTweets', {})).rejects.toBeInstanceOf(RateLimitError);
   });
 
   it('uses bounded retries for transient network and 5xx failures', async () => {
@@ -236,6 +309,26 @@ describe('URT parsing, normalization, and filters', () => {
 
   it('rejects malformed graphQL shapes rather than silently emitting partial data', () => {
     expect(() => extractTimelinePage({ data: { user: {} } })).toThrow(/timeline/i);
+    expect(() => extractTimelinePage({ data: { user: { result: { timeline_v2: { timeline: { instructions: ['bad'] } } } } } })).toThrow(/instruction/i);
+    expect(() => extractTimelinePage({ data: { user: { result: { timeline_v2: { timeline: { instructions: [{ type: 'TimelineAddEntries', entries: ['bad'] }] } } } } } })).toThrow(/entry/i);
+    expect(extractTimelinePage({ data: { user: { result: { timeline_v2: { timeline: { instructions: [{ type: 'TimelineAddEntries', entries: [{ entryId: 'cursor-bottom', content: { cursorType: 'Bottom', value: 'next' } }] }] } } } } } })).toEqual({ tweets: [], bottomCursor: 'next' });
     expect(() => normalizeTweet({ rest_id: '101', legacy: {} }, '2025-01-02T00:00:00.000Z')).toThrow(/tweet/i);
+  });
+
+  it('applies hashtag filters with case-insensitive AND semantics and safe standalone defaults', () => {
+    const base = normalizeTweet(rawTweet, '2025-01-02T00:00:00.000Z');
+    const twoTags = { ...base, entities: { ...base.entities, hashtags: ['News', 'Apify'] } };
+    expect(applyTweetFilters([twoTags], { hashtags: ['news', 'APIFY'] })).toEqual([twoTags]);
+    expect(applyTweetFilters([twoTags], { hashtags: ['news', 'missing'] })).toEqual([]);
+    expect(applyTweetFilters([{ ...base, isRetweet: true }], {})).toEqual([]);
+  });
+
+  it('expands t.co URLs without swallowing punctuation and decodes named and numeric source entities', () => {
+    const punctuated = structuredClone(rawTweet);
+    punctuated.legacy.full_text = 'Read https://t.co/a, now';
+    punctuated.legacy.source = '<a>Client &quot;App&quot; &#38; &#x1F680;</a>';
+    const normalized = normalizeTweet(punctuated, '2025-01-02T00:00:00.000Z');
+    expect(normalized.text).toBe('Read https://example.com/article, now');
+    expect(normalized.source).toBe('Client "App" & 🚀');
   });
 });
