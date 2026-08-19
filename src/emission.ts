@@ -1,6 +1,6 @@
 import { createHmac, createPublicKey, randomUUID, verify as verifySignature, type KeyObject } from 'node:crypto';
 import { canonicalRequest, hashTweetId, type EntitlementSubject } from './entitlements.js';
-import type { EntitlementResolution, SignedDecision, SignedReservationResponse } from './contracts.js';
+import { EntitlementResolutionSchema, SignedReservationResponseSchema, type EntitlementResolution, type SignedDecision, type SignedReservationResponse } from './contracts.js';
 
 export interface ReservationCall {
   version: 1;
@@ -39,6 +39,11 @@ export interface PlatformApifyEnv {
   actorRunId?: string;
   userId?: string;
   userIsPaying?: string;
+}
+
+export interface BatchReservationOutcome {
+  grantedIds: Set<string>;
+  deniedIds: Set<string>;
 }
 
 export async function createPlatformEntitlementClient(options: Omit<ActorEntitlementClientOptions, 'subject' | 'platformIsPaying'>): Promise<ActorEntitlementClient> {
@@ -105,7 +110,7 @@ export class ActorEntitlementClient {
   constructor(private readonly options: ActorEntitlementClientOptions) {
     if (!Number.isSafeInteger(options.maxResults) || options.maxResults < 1 || options.maxResults > 10_000) throw new Error('invalid maxResults');
     if (typeof options.platformIsPaying !== 'boolean') throw new Error('missing platform payer identity');
-    if (!options.signer && !options.endpoint) throw new Error('entitlement endpoint is not configured');
+    if (!options.signer && !options.resolver && !options.endpoint) throw new Error('entitlement endpoint is not configured');
     this.key = keyFromPinned(options.pinnedPublicKey);
     this.now = options.now ?? Date.now;
   }
@@ -120,14 +125,17 @@ export class ActorEntitlementClient {
       tweetIds,
       requestId: `${this.options.subject.runId}:${tweetIds.map(hashTweetId).join(',')}`,
     };
-    const response = this.options.signer ? await this.options.signer(body) : await this.post<SignedReservationResponse>('/entitlements/reserve', body);
-    this.validateResponse(response);
-    return response;
+    const response: unknown = this.options.signer ? await this.options.signer(body) : await this.post<unknown>('/api/entitlements/reserve', body);
+    return this.validateResponse(response);
   }
 
   async grant(tweetId: string): Promise<boolean> {
     const response = await this.reserve([tweetId]);
     return response.decisions.some((decision) => decision.tweetId === tweetId && decision.decision === 'grant');
+  }
+
+  currentTime(): number {
+    return this.now();
   }
 
   async resolve(): Promise<EntitlementResolution> {
@@ -139,10 +147,18 @@ export class ActorEntitlementClient {
       platformIsPaying: this.options.platformIsPaying,
       requestedMaxResults: this.options.maxResults,
     };
-    const resolution = this.options.resolver ? await this.options.resolver(body) : await this.post<EntitlementResolution>('/entitlements/resolve', body);
+    const rawResolution: unknown = this.options.resolver ? await this.options.resolver(body) : await this.post<unknown>('/api/entitlements/resolve', body);
+    return this.validateResolution(rawResolution);
+  }
+
+  private validateResolution(rawResolution: unknown): EntitlementResolution {
+    const resolution = EntitlementResolutionSchema.parse(rawResolution);
     if (this.options.pinnedKeyId !== undefined && resolution.keyId !== this.options.pinnedKeyId) throw new Error('unexpected signing key');
     if (resolution.subject.actorId !== this.options.subject.actorId || resolution.subject.runId !== this.options.subject.runId || resolution.subject.userId !== this.options.subject.userId) throw new Error('signed resolution subject mismatch');
-    if (Date.parse(resolution.expiresAt) <= this.now()) throw new Error('signed resolution expired');
+    this.assertFutureExpiry(resolution.expiresAt, 'signed resolution');
+    if (resolution.effectiveLimit > this.options.maxResults) throw new Error('signed resolution effective limit exceeds requested limit');
+    if (resolution.tier === 'unknown' && resolution.effectiveLimit !== 0) throw new Error('unknown tier must have an effective limit of zero');
+    if (resolution.tier === 'free' && resolution.effectiveLimit > 10) throw new Error('free tier effective limit exceeds ten');
     const payloadToVerify = { ...resolution } as Record<string, unknown>;
     const signature = String(payloadToVerify.signature);
     delete payloadToVerify.signature;
@@ -168,82 +184,95 @@ export class ActorEntitlementClient {
     return payload as T;
   }
 
-  private validateResponse(response: SignedReservationResponse): void {
+  private validateResponse(rawResponse: unknown): SignedReservationResponse {
+    const response = SignedReservationResponseSchema.parse(rawResponse);
     if (this.options.pinnedKeyId !== undefined && response.keyId !== this.options.pinnedKeyId) throw new Error('unexpected signing key');
     if (response.subject.actorId !== this.options.subject.actorId || response.subject.runId !== this.options.subject.runId || response.subject.userId !== this.options.subject.userId) throw new Error('signed response subject mismatch');
-    if (Date.parse(response.expiresAt) <= this.now()) throw new Error('signed response expired');
+    this.assertFutureExpiry(response.expiresAt, 'signed response');
     if (!verifySigned(responsePayload(response), response.signature, this.key)) throw new Error('invalid response signature');
     for (const decision of response.decisions) {
       if (decision.subject.actorId !== this.options.subject.actorId || decision.subject.runId !== this.options.subject.runId || decision.subject.userId !== this.options.subject.userId) throw new Error('signed decision subject mismatch');
-      if (Date.parse(decision.expiresAt) <= this.now()) throw new Error('signed decision expired');
+      this.assertFutureExpiry(decision.expiresAt, 'signed decision');
       if (!verifySigned(decisionPayload(decision), decision.signature, this.key)) throw new Error('invalid decision signature');
     }
+    return response;
+  }
+
+  private assertFutureExpiry(value: string, label: string): void {
+    const expiry = Date.parse(value);
+    if (!Number.isFinite(expiry) || expiry <= this.now()) throw new Error(`${label} expired`);
   }
 }
 
 export class EmissionGuard {
   private chain: Promise<void> = Promise.resolve();
-  private readonly granted = new Set<string>();
+  private readonly granted = new Map<string, number>();
 
   constructor(private readonly client: ActorEntitlementClient) {}
 
   async reserve(tweetId: string): Promise<boolean> {
-    let allowed = false;
-    await this.enqueue(async () => {
-      if (this.granted.has(tweetId)) {
-        allowed = true;
-        return;
-      }
-      try {
-        allowed = await this.client.grant(tweetId);
-        if (allowed) this.granted.add(tweetId);
-      } catch {
-        allowed = false;
-      }
-    });
-    return allowed;
+    try {
+      return (await this.reserveBatch([tweetId])).grantedIds.has(tweetId);
+    } catch {
+      return false;
+    }
   }
 
-  async reserveBatch(tweetIds: string[]): Promise<Set<string>> {
-    const allowed = new Set<string>();
-    await this.enqueue(async () => {
-      const unique = [...new Set(tweetIds)];
-      if (unique.length === 0 || unique.length > 20) throw new Error('reservation batches must contain 1..20 unique IDs');
-      const pending = unique.filter((tweetId) => !this.granted.has(tweetId));
-      for (const tweetId of unique) if (this.granted.has(tweetId)) allowed.add(tweetId);
-      if (pending.length === 0) return;
-      try {
-        const response = await this.client.reserve(pending);
-        for (const decision of response.decisions) {
-          if (decision.decision !== 'grant' || !pending.includes(decision.tweetId)) continue;
-          this.granted.add(decision.tweetId);
-          allowed.add(decision.tweetId);
-        }
-      } catch {
-        // The caller receives no grant when the signer is unavailable or invalid.
-      }
-    });
-    return allowed;
+  async reserveBatch(tweetIds: string[]): Promise<BatchReservationOutcome> {
+    let outcome: BatchReservationOutcome | undefined;
+    await this.enqueue(async () => { outcome = await this.reserveBatchInner(tweetIds); });
+    if (outcome === undefined) throw new Error('reservation did not produce an outcome');
+    return outcome;
   }
 
   async canEmit(tweetId: string): Promise<boolean> {
-    return this.granted.has(tweetId);
+    return this.hasUsableGrant(tweetId);
   }
 
   async emit<T>(tweetId: string, push: () => Promise<T> | T): Promise<T | undefined> {
     let result: T | undefined;
     await this.enqueue(async () => {
-      if (!this.granted.has(tweetId)) {
-        try {
-          if (!(await this.client.grant(tweetId))) return;
-          this.granted.add(tweetId);
-        } catch {
-          return;
-        }
-      }
+      if (!this.hasUsableGrant(tweetId) && !(await this.reserveBatchInner([tweetId])).grantedIds.has(tweetId)) return;
+      if (!this.hasUsableGrant(tweetId)) throw new Error('grant expired before emission');
       result = await push();
     });
     return result;
+  }
+
+  private hasUsableGrant(tweetId: string): boolean {
+    const expiresAt = this.granted.get(tweetId);
+    if (expiresAt === undefined) return false;
+    if (expiresAt > this.client.currentTime()) return true;
+    this.granted.delete(tweetId);
+    return false;
+  }
+
+  private async reserveBatchInner(tweetIds: string[]): Promise<BatchReservationOutcome> {
+    const unique = [...new Set(tweetIds)];
+    if (unique.length === 0 || unique.length > 20) throw new Error('reservation batches must contain 1..20 unique IDs');
+    const grantedIds = new Set<string>();
+    const deniedIds = new Set<string>();
+    const pending = unique.filter((tweetId) => !this.hasUsableGrant(tweetId));
+    for (const tweetId of unique) if (!pending.includes(tweetId)) grantedIds.add(tweetId);
+    if (pending.length === 0) return { grantedIds, deniedIds };
+    const response = await this.client.reserve(pending);
+    const decisions = new Map<string, SignedDecision>();
+    for (const decision of response.decisions) {
+      if (!pending.includes(decision.tweetId) || decisions.has(decision.tweetId)) throw new Error('reservation response did not match requested IDs');
+      decisions.set(decision.tweetId, decision);
+    }
+    if (decisions.size !== pending.length) throw new Error('reservation response omitted a requested ID');
+    for (const tweetId of pending) {
+      const decision = decisions.get(tweetId);
+      if (decision === undefined) throw new Error('reservation response omitted a requested ID');
+      if (decision.decision === 'deny') {
+        deniedIds.add(tweetId);
+        continue;
+      }
+      this.granted.set(tweetId, Date.parse(decision.expiresAt));
+      grantedIds.add(tweetId);
+    }
+    return { grantedIds, deniedIds };
   }
 
   private enqueue(operation: () => Promise<void>): Promise<void> {

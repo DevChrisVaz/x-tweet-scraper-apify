@@ -71,7 +71,7 @@ function emitter(limit: number) {
         batches.push([...ids]);
         const result = new Set<string>();
         for (const id of ids) if (granted.size < limit) { granted.add(id); result.add(id); }
-        return result;
+        return { grantedIds: result, deniedIds: new Set(ids.filter((id) => !result.has(id))) };
       },
       emit: async (id: string, push: () => Promise<void>) => {
         if (!granted.has(id)) return false;
@@ -86,6 +86,25 @@ function emitter(limit: number) {
 const subject = { actorId: 'actor-1', runId: 'run-1', userId: 'user-1' };
 
 describe('actor coordinator integration', () => {
+  it('writes fail-closed OUTPUT when checkpoint state cannot be loaded', async () => {
+    const outputs: unknown[] = [];
+    await expect(runCoordinator({
+      input: { fromUsers: ['a'], maxResults: 10 },
+      subject,
+      sourceFactory: source({ a: [] }),
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 10 }) },
+      emission: emitter(10).boundary,
+      persistence: {
+        load: async () => { throw new Error('state unavailable'); },
+        save: async () => undefined,
+        writeOutput: async (metadata) => { outputs.push(metadata); },
+      },
+      pushData: async () => undefined,
+      now: () => '2025-01-02T00:00:00.000Z',
+    })).resolves.toMatchObject({ tier: 'unknown', effectiveLimit: 0, statistics: { errors: 1 } });
+    expect(outputs).toHaveLength(1);
+  });
+
   it('caps a free 1000-result request at ten signed dataset pushes in batches of at most twenty', async () => {
     const pushed: TweetOutput[] = [];
     const storage = memoryState();
@@ -190,6 +209,7 @@ describe('actor coordinator integration', () => {
 
   it('cancels further pagination when an authoritative reservation is partially denied', async () => {
     const storage = memoryState();
+    const logs: unknown[] = [];
     let pages = 0;
     const sourceFactory = async () => ({
       userByScreenName: async () => ({ rest_id: 'a' }),
@@ -203,12 +223,108 @@ describe('actor coordinator integration', () => {
       input: { fromUsers: ['a'], maxResults: 10 }, subject, sourceFactory,
       entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 10 }) },
       emission: {
-        reserveBatch: async (ids) => new Set(ids.slice(0, 1)),
+        reserveBatch: async (ids) => ({ grantedIds: new Set(ids.slice(0, 1)), deniedIds: new Set(ids.slice(1)) }),
         emit: async (_id, push) => { await push(); return true; },
       },
-      persistence: storage.persistence, pushData: async () => undefined, now: () => '2025-01-02T00:00:00.000Z',
+      persistence: storage.persistence, pushData: async () => undefined, now: () => '2025-01-02T00:00:00.000Z', log: (entry) => { logs.push(entry); },
     });
     expect(pages).toBe(1);
+    expect(storage.state?.seenIds).toEqual(expect.arrayContaining(['page-1-a', 'page-1-b']));
+    expect(logs).not.toContainEqual(expect.objectContaining({ event: 'signer_unavailable' }));
+  });
+
+  it('retains a signer-outage candidate for a resumed run instead of terminally seeing it', async () => {
+    const storage = memoryState();
+    const sourceFactory = source({ a: [rawTweet('retry-me')] });
+    await runCoordinator({
+      input: { fromUsers: ['a'], maxResults: 10 }, subject, sourceFactory,
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 10 }) },
+      emission: { reserveBatch: async () => { throw new Error('signer unavailable'); }, emit: async () => false },
+      persistence: storage.persistence, pushData: async () => undefined, now: () => '2025-01-02T00:00:00.000Z',
+    });
+    expect(storage.state).toMatchObject({ seenIds: [] });
+
+    const pushed: TweetOutput[] = [];
+    await runCoordinator({
+      input: { fromUsers: ['a'], maxResults: 10 }, subject, sourceFactory,
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 10 }) },
+      emission: emitter(10).boundary,
+      persistence: storage.persistence, pushData: async (tweet) => { pushed.push(tweet); }, now: () => '2025-01-02T00:00:00.000Z',
+    });
+    expect(pushed.map((tweet) => tweet.id)).toEqual(['retry-me']);
+  });
+
+  it('retries a granted item after dataset push failure before advancing its saved cursor', async () => {
+    const storage = memoryState();
+    const sourceFactory = source({ a: [rawTweet('granted-retry')] });
+    const logs: unknown[] = [];
+    await runCoordinator({
+      input: { fromUsers: ['a'], maxResults: 10 }, subject, sourceFactory,
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 10 }) },
+      emission: {
+        reserveBatch: async (ids) => ({ grantedIds: new Set(ids), deniedIds: new Set<string>() }),
+        emit: async (_id, push) => { await push(); return true; },
+      },
+      persistence: storage.persistence, pushData: async () => { throw new Error('dataset unavailable'); }, now: () => '2025-01-02T00:00:00.000Z', log: (entry) => { logs.push(entry); },
+    });
+    expect(storage.state).toMatchObject({
+      seenIds: [],
+      targets: { 'author:a': { cursor: null, exhausted: false } },
+      pending: { 'granted-retry': { granted: true } },
+    });
+    expect(logs).toContainEqual(expect.objectContaining({ event: 'emission_failed' }));
+
+    const pushed: TweetOutput[] = [];
+    await runCoordinator({
+      input: { fromUsers: ['a'], maxResults: 10 }, subject, sourceFactory,
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 10 }) },
+      emission: {
+        reserveBatch: async (ids) => ({ grantedIds: new Set(ids), deniedIds: new Set<string>() }),
+        emit: async (_id, push) => { await push(); return true; },
+      },
+      persistence: storage.persistence, pushData: async (tweet) => { pushed.push(tweet); }, now: () => '2025-01-02T00:00:00.000Z',
+    });
+    expect(pushed.map((tweet) => tweet.id)).toEqual(['granted-retry']);
+  });
+
+  it('persists an exhausted target when a timeline repeats a cursor', async () => {
+    const storage = memoryState();
+    const guard = emitter(10);
+    const logs: unknown[] = [];
+    let pages = 0;
+    const sourceFactory = async () => ({
+      userByScreenName: async () => ({ rest_id: 'a' }),
+      userTweets: async () => {
+        pages += 1;
+        if (pages > 2) throw new Error('repeat was not stopped');
+        return { tweets: [], bottomCursor: 'repeated-cursor' };
+      },
+      tweetById: async () => rawTweet('unused'),
+    });
+    await runCoordinator({
+      input: { fromUsers: ['a'], maxResults: 10 }, subject, sourceFactory,
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 10 }) }, emission: guard.boundary,
+      persistence: storage.persistence, pushData: async () => undefined, now: () => '2025-01-02T00:00:00.000Z', log: (entry) => { logs.push(entry); },
+    });
+    expect(pages).toBe(2);
+    expect(storage.state).toMatchObject({ targets: { 'author:a': { cursor: 'repeated-cursor', exhausted: true } } });
+    expect(logs).toContainEqual(expect.objectContaining({ event: 'cursor_stopped', target: 'author:a' }));
+  });
+
+  it('serializes capacity calculation with reservation across concurrent targets', async () => {
+    const storage = memoryState();
+    const pushed: TweetOutput[] = [];
+    await runCoordinator({
+      input: { fromUsers: ['a', 'b'], maxResults: 10 }, subject,
+      sourceFactory: source({ a: [rawTweet('a')], b: [rawTweet('b')] }),
+      entitlement: { resolve: async () => ({ tier: 'paid' as const, effectiveLimit: 1 }) },
+      emission: {
+        reserveBatch: async (ids) => { await Promise.resolve(); return { grantedIds: new Set(ids), deniedIds: new Set<string>() }; },
+        emit: async (_id, push) => { await push(); return true; },
+      },
+      persistence: storage.persistence, pushData: async (tweet) => { pushed.push(tweet); }, now: () => '2025-01-02T00:00:00.000Z', concurrency: 2,
+    });
+    expect(pushed).toHaveLength(1);
   });
 
   it('isolates target failures, rejects invalid output, fails closed on signer outage, and always writes OUTPUT', async () => {

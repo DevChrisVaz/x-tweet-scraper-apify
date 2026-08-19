@@ -19,7 +19,7 @@ function errorResponse(error: unknown): Response {
 function requestFromWeb(request: Request): Promise<AuthenticatedRequest> {
   return request.json().then((body: unknown) => {
     const pathname = new URL(request.url).pathname;
-    return { method: request.method, path: pathname.replace(/^\/api(?=\/)/, ''), headers: request.headers, body };
+    return { method: request.method, path: pathname, headers: request.headers, body };
   });
 }
 

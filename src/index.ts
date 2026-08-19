@@ -10,6 +10,19 @@ export interface ApifyPersistenceApi {
   setValue(key: string, value: unknown, options?: Record<string, unknown>): Promise<void>;
 }
 
+export interface ActorRuntimeApi extends ApifyPersistenceApi {
+  init(): Promise<void>;
+  exit(): Promise<void>;
+  getEnv(): unknown;
+  getInput(): Promise<unknown>;
+  createProxyConfiguration(options?: {
+    useApifyProxy: boolean;
+    apifyProxyGroups?: string[];
+    apifyProxyCountry?: string;
+  }): Promise<{ newUrl(sessionId?: string): Promise<string | undefined> } | undefined>;
+  pushData(data: unknown): Promise<void>;
+}
+
 function emptyCoordinatorState(): CoordinatorState {
   return { version: 1, targets: {}, seenIds: [], statistics: createEmptyStatistics() };
 }
@@ -57,13 +70,27 @@ async function writeFailClosedOutput(persistence: CoordinatorPersistence, env: R
   await persistence.writeOutput(metadata);
 }
 
-export async function runApifyActor(): Promise<void> {
-  await Actor.init();
-  const env = Actor.getEnv() as unknown as Record<string, unknown>;
-  const persistence = await createApifyPersistence(Actor);
+async function writeMinimalFailClosedOutput(actor: ApifyPersistenceApi, env: Record<string, unknown>): Promise<void> {
+  const metadata = OutputMetadataSchema.parse({
+    version: 1,
+    ...fallbackSubject(env),
+    tier: 'unknown',
+    effectiveLimit: 0,
+    statistics: { ...createEmptyStatistics(), errors: 1 },
+    completedAt: new Date().toISOString(),
+  });
+  await actor.setValue(OUTPUT.name, metadata, { contentType: OUTPUT.contentType });
+}
+
+export async function runApifyActorWithRuntime(actor: ActorRuntimeApi): Promise<void> {
+  let env: Record<string, unknown> = {};
+  let persistence: CoordinatorPersistence | undefined;
   let invalidInput = false;
   try {
-    const parsedInput = ActorInputSchema.safeParse(await Actor.getInput());
+    await actor.init();
+    env = actor.getEnv() as Record<string, unknown>;
+    persistence = await createApifyPersistence(actor);
+    const parsedInput = ActorInputSchema.safeParse(await actor.getInput());
     if (!parsedInput.success) {
       invalidInput = true;
       throw parsedInput.error;
@@ -87,7 +114,7 @@ export async function runApifyActor(): Promise<void> {
       ...(input.proxyConfiguration.apifyProxyGroups === undefined ? {} : { apifyProxyGroups: input.proxyConfiguration.apifyProxyGroups }),
       ...(input.proxyConfiguration.apifyProxyCountry === undefined ? {} : { apifyProxyCountry: input.proxyConfiguration.apifyProxyCountry }),
     };
-    const proxy = await Actor.createProxyConfiguration(proxyOptions);
+    const proxy = await actor.createProxyConfiguration(proxyOptions);
     await runCoordinator({
       input,
       subject: identity.subject,
@@ -98,15 +125,24 @@ export async function runApifyActor(): Promise<void> {
         emit: async (tweetId, push) => (await guard.emit(tweetId, async () => { await push(); return true; })) === true,
       },
       persistence,
-      pushData: async (tweet: TweetOutput) => Actor.pushData(tweet),
+      pushData: async (tweet: TweetOutput) => actor.pushData(tweet),
       log: (entry) => log.warning('X coordinator event', entry),
     });
   } catch (error) {
-    await writeFailClosedOutput(persistence, env);
+    try {
+      if (persistence === undefined) await writeMinimalFailClosedOutput(actor, env);
+      else await writeFailClosedOutput(persistence, env);
+    } catch (outputError) {
+      log.error('Unable to write fail-closed Actor OUTPUT', { message: outputError instanceof Error ? outputError.message : 'unknown error' });
+    }
     if (invalidInput) throw error;
   } finally {
-    await Actor.exit();
+    await actor.exit();
   }
+}
+
+export async function runApifyActor(): Promise<void> {
+  return runApifyActorWithRuntime(Actor as unknown as ActorRuntimeApi);
 }
 
 if (process.argv[1] !== undefined && import.meta.url === new URL(`file://${process.argv[1]}`).href) {

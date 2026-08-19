@@ -1,4 +1,4 @@
-import { createHmac, generateKeyPairSync } from 'node:crypto';
+import { createHmac, generateKeyPairSync, sign as signBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   canonicalRequest,
@@ -11,6 +11,24 @@ import { ActorEntitlementClient, EmissionGuard } from '../src/emission.js';
 const subject = { actorId: 'actor-1', runId: 'run-1', userId: 'user-1' } as const;
 const keyPair = generateKeyPairSync('ed25519');
 const publicKey = keyPair.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+}
+
+function signedResolution(payload: { tier: 'free' | 'paid' | 'unknown'; effectiveLimit: number; expiresAt: string; issuedAt?: string }) {
+  const unsigned = {
+    subject,
+    tier: payload.tier,
+    effectiveLimit: payload.effectiveLimit,
+    expiresAt: payload.expiresAt,
+    issuedAt: payload.issuedAt ?? '2023-11-14T22:13:20.000Z',
+  };
+  return { ...unsigned, signature: signBytes(null, Buffer.from(canonicalJson(unsigned)), keyPair.privateKey).toString('base64url'), keyId: 'test-key' };
+}
 
 function authHeaders(body: unknown, secret = 'hmac-secret', now = 1_700_000_000_000) {
   const timestamp = String(now);
@@ -105,9 +123,42 @@ describe('actor emission guard', () => {
       signer: async (request) => service.handleReservation({ subject, tweetIds: request.tweetIds }), pinnedPublicKey: publicKey, now: () => 1_700_000_000_000,
     });
     const guard = new EmissionGuard(client);
-    await expect(guard.reserveBatch(['tweet-1', 'tweet-2'])).resolves.toEqual(new Set(['tweet-1', 'tweet-2']));
+    await expect(guard.reserveBatch(['tweet-1', 'tweet-2'])).resolves.toEqual({ grantedIds: new Set(['tweet-1', 'tweet-2']), deniedIds: new Set() });
     expect(await guard.canEmit('tweet-1')).toBe(true);
     expect(await guard.canEmit('tweet-2')).toBe(true);
+  });
+
+  it('returns signed denials separately from grants and propagates signer outages', async () => {
+    const repository = new InMemoryEntitlementRepository();
+    const service = new EntitlementService(repository, { signingPrivateKey: keyPair.privateKey, signingKeyId: 'test-key', now: () => 1_700_000_000_000 });
+    await service.resolve({ subject, maxResults: 1, isPaying: true });
+    const client = new ActorEntitlementClient({
+      subject, platformIsPaying: true, maxResults: 1, hmacSecret: 'hmac-secret',
+      signer: async (request) => service.handleReservation({ subject, tweetIds: request.tweetIds }), pinnedPublicKey: publicKey, now: () => 1_700_000_000_000,
+    });
+    const guard = new EmissionGuard(client);
+    await expect(guard.reserveBatch(['tweet-1', 'tweet-2'])).resolves.toEqual({ grantedIds: new Set(['tweet-1']), deniedIds: new Set(['tweet-2']) });
+    const offline = new EmissionGuard(new ActorEntitlementClient({
+      subject, platformIsPaying: true, maxResults: 1, hmacSecret: 'hmac-secret', signer: async () => { throw new Error('signer offline'); }, pinnedPublicKey: publicKey, now: () => 1_700_000_000_000,
+    }));
+    await expect(offline.reserveBatch(['tweet-3'])).rejects.toThrow('signer offline');
+  });
+
+  it('does not emit a cached grant after its signed expiry', async () => {
+    let now = 1_700_000_000_000;
+    const repository = new InMemoryEntitlementRepository();
+    const service = new EntitlementService(repository, { signingPrivateKey: keyPair.privateKey, signingKeyId: 'test-key', now: () => 1_700_000_000_000 });
+    await service.resolve({ subject, maxResults: 1, isPaying: false });
+    const client = new ActorEntitlementClient({
+      subject, platformIsPaying: false, maxResults: 1, hmacSecret: 'hmac-secret',
+      signer: async (request) => service.handleReservation({ subject, tweetIds: request.tweetIds }), pinnedPublicKey: publicKey, now: () => now,
+    });
+    const guard = new EmissionGuard(client);
+    await guard.reserveBatch(['tweet-1']);
+    now += 8 * 24 * 60 * 60 * 1_000;
+    let pushed = false;
+    await expect(guard.emit('tweet-1', async () => { pushed = true; })).rejects.toThrow(/expired/i);
+    expect(pushed).toBe(false);
   });
 
   it('rejects a signed response whose subject does not match the platform identity', async () => {
@@ -125,5 +176,32 @@ describe('actor emission guard', () => {
       now: () => 1_700_000_000_000,
     });
     await expect(client.reserve(['tweet-1'])).rejects.toThrow(/subject/i);
+  });
+});
+
+describe('actor resolution validation', () => {
+  it('rejects a signed resolution with a non-finite expiry before sources begin', async () => {
+    const client = new ActorEntitlementClient({
+      subject, platformIsPaying: false, maxResults: 100, hmacSecret: 'hmac-secret', pinnedPublicKey: publicKey, now: () => 1_700_000_000_000,
+      resolver: async () => signedResolution({ tier: 'free', effectiveLimit: 10, expiresAt: 'not-a-date' }) as never,
+      signer: async () => { throw new Error('not used'); },
+    });
+    await expect(client.resolve()).rejects.toThrow(/datetime|expiry/i);
+  });
+
+  it('rejects signed tier limits that exceed the local free, unknown, or requested cap', async () => {
+    const cases = [
+      signedResolution({ tier: 'unknown', effectiveLimit: 1, expiresAt: '2025-01-01T00:00:00.000Z' }),
+      signedResolution({ tier: 'free', effectiveLimit: 11, expiresAt: '2025-01-01T00:00:00.000Z' }),
+      signedResolution({ tier: 'paid', effectiveLimit: 101, expiresAt: '2025-01-01T00:00:00.000Z' }),
+    ];
+    for (const response of cases) {
+      const client = new ActorEntitlementClient({
+        subject, platformIsPaying: true, maxResults: 100, hmacSecret: 'hmac-secret', pinnedPublicKey: publicKey, now: () => 1_700_000_000_000,
+        resolver: async () => response as never,
+        signer: async () => { throw new Error('not used'); },
+      });
+      await expect(client.resolve()).rejects.toThrow(/limit/i);
+    }
   });
 });

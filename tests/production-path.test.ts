@@ -74,6 +74,30 @@ describe('Actor HTTP to Vercel entitlement path', () => {
     expect(reservation.decisions[0]?.decision).toBe('grant');
   });
 
+  it('calls the deployed Vercel /api entitlement routes from a project-origin endpoint', async () => {
+    const { handlers } = createHandlers();
+    const urls: string[] = [];
+    const client = new ActorEntitlementClient({
+      subject: { actorId: 'actor-1', runId: 'run-api-route', userId: 'user-1' },
+      platformIsPaying: false,
+      maxResults: 10,
+      hmacSecret: 'hmac-secret',
+      endpoint,
+      fetcher: async (input, init) => {
+        urls.push(String(input));
+        return routeFetcher(handlers)(input, init);
+      },
+      pinnedPublicKey: publicKey,
+      now: () => 1_700_000_000_000,
+    });
+    await client.resolve();
+    await client.reserve(['tweet-1']);
+    expect(urls).toEqual([
+      'https://entitlements.example.test/api/entitlements/resolve',
+      'https://entitlements.example.test/api/entitlements/reserve',
+    ]);
+  });
+
   it('trusts payer status per authenticated run and never shares limits between users', async () => {
     const { handlers } = createHandlers();
     const paid = new ActorEntitlementClient({ subject: { actorId: 'actor-1', runId: 'run-paid', userId: 'user-paid' }, platformIsPaying: true, maxResults: 100, hmacSecret: 'hmac-secret', endpoint, fetcher: routeFetcher(handlers), pinnedPublicKey: publicKey, now: () => 1_700_000_000_000 });
@@ -118,12 +142,12 @@ describe('Actor HTTP to Vercel entitlement path', () => {
     const body = { version: 1, actorId: 'actor-1', runId: 'run-1', userId: 'user-1', platformIsPaying: false, requestedMaxResults: 100 };
     const timestamp = '1700000000000';
     const nonce = 'fixed-test-nonce';
-    const signature = createHmac('sha256', 'hmac-secret').update(canonicalRequest('POST', '/entitlements/resolve', timestamp, nonce, body)).digest('base64url');
-    const request = () => new Request(`${endpoint}/entitlements/resolve`, { method: 'POST', body: JSON.stringify(body), headers: { 'x-entitlement-timestamp': timestamp, 'x-entitlement-nonce': nonce, 'x-entitlement-signature': signature } });
+    const signature = createHmac('sha256', 'hmac-secret').update(canonicalRequest('POST', '/api/entitlements/resolve', timestamp, nonce, body)).digest('base64url');
+    const request = () => new Request(`${endpoint}/api/entitlements/resolve`, { method: 'POST', body: JSON.stringify(body), headers: { 'x-entitlement-timestamp': timestamp, 'x-entitlement-nonce': nonce, 'x-entitlement-signature': signature } });
     expect((await handlers.resolve(request())).status).toBe(200);
     expect((await handlers.resolve(request())).status).toBe(401);
     const tampered = { ...body, requestedMaxResults: 10_000 };
-    expect((await handlers.resolve(new Request(`${endpoint}/entitlements/resolve`, { method: 'POST', body: JSON.stringify(tampered), headers: { 'x-entitlement-timestamp': timestamp, 'x-entitlement-nonce': 'tampered-nonce', 'x-entitlement-signature': signature } }))).status).toBe(401);
+    expect((await handlers.resolve(new Request(`${endpoint}/api/entitlements/resolve`, { method: 'POST', body: JSON.stringify(tampered), headers: { 'x-entitlement-timestamp': timestamp, 'x-entitlement-nonce': 'tampered-nonce', 'x-entitlement-signature': signature } }))).status).toBe(401);
   });
 });
 

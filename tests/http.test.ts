@@ -20,7 +20,7 @@ describe('Vercel entitlement handlers', () => {
   it('uses platform paying identity and freezes free resolution at ten', async () => {
     const { handlers } = setup();
     const body = { version: 1, actorId: 'actor-1', runId: 'run-1', userId: 'user-1', platformIsPaying: false, requestedMaxResults: 1000 };
-    const response = await handlers.resolve(await signedRequest('/entitlements/resolve', body, 'resolve-1'));
+    const response = await handlers.resolve(await signedRequest('/api/entitlements/resolve', body, 'resolve-1'));
     expect(response.status).toBe(200);
     const result = await response.json() as { tier: string; effectiveLimit: number };
     expect(result.tier).toBe('free');
@@ -30,9 +30,9 @@ describe('Vercel entitlement handlers', () => {
   it('rejects a bad HMAC and a non-canonical actor before resolving', async () => {
     const { handlers } = setup();
     const body = { version: 1, actorId: 'forked-actor', runId: 'run-1', userId: 'user-1', platformIsPaying: true, requestedMaxResults: 100 };
-    const response = await handlers.resolve(await signedRequest('/entitlements/resolve', body, 'resolve-2', 'wrong'));
+    const response = await handlers.resolve(await signedRequest('/api/entitlements/resolve', body, 'resolve-2', 'wrong'));
     expect(response.status).toBe(401);
-    const mismatch = await handlers.resolve(await signedRequest('/entitlements/resolve', body, 'resolve-3'));
+    const mismatch = await handlers.resolve(await signedRequest('/api/entitlements/resolve', body, 'resolve-3'));
     expect(mismatch.status).toBe(401);
   });
 });
