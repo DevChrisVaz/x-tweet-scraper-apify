@@ -1,5 +1,5 @@
 import Ajv from 'ajv';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
@@ -43,10 +43,20 @@ describe('fresh-clone packaging gates', () => {
     expect(functionConfig?.runtime).toBeUndefined();
   });
 
-  it('declares a Functions-only Vercel project without static build output', () => {
+  it('skips the root build while constraining static output to public', () => {
     const vercel = readJson('vercel.json');
-    expect(vercel.buildCommand).toBeNull();
-    expect(vercel.outputDirectory).toBeNull();
+    expect(vercel.buildCommand).toBe('');
+    expect(vercel.outputDirectory).toBe('public');
+  });
+
+  it('allows only the inert robots asset in the static output directory', () => {
+    const publicUrl = new URL('../public', import.meta.url);
+    const publicFiles = existsSync(publicUrl) ? readdirSync(publicUrl).sort() : [];
+    expect(publicFiles).toEqual(['robots.txt']);
+    const robotsUrl = new URL('../public/robots.txt', import.meta.url);
+    if (existsSync(robotsUrl)) {
+      expect(readFileSync(robotsUrl, 'utf8')).toBe('User-agent: *\nDisallow: /\n');
+    }
   });
 
   it('pins Vercel builds and functions to the documented Node 24 selector', () => {

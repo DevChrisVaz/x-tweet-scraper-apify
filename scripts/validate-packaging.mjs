@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 const root = new URL('..', import.meta.url);
@@ -35,7 +35,13 @@ if (inputSchema.properties?.searchTerms?.maxItems !== 0) fail('input schema must
 if (!Array.isArray(inputSchema.anyOf) || inputSchema.anyOf.length !== 2) fail('input schema must require fromUsers or tweetIds');
 
 const vercel = json('vercel.json');
-if (vercel.buildCommand !== null || vercel.outputDirectory !== null) fail('Vercel Functions-only config must null buildCommand and outputDirectory');
+if (vercel.buildCommand !== '' || vercel.outputDirectory !== 'public') fail('Vercel Functions-only config must skip the root build and constrain static output to public');
+if (vercel.builds !== undefined || vercel.public !== undefined) fail('Vercel config must not enable legacy or public source/static exposure');
+const publicDir = new URL('public/', root);
+if (!existsSync(publicDir)) fail('Vercel Functions-only config must include its explicit public output directory');
+const publicAssets = readdirSync(publicDir).sort();
+if (publicAssets.length !== 1 || publicAssets[0] !== 'robots.txt') fail('public must contain only robots.txt');
+if (readFileSync(new URL('public/robots.txt', root), 'utf8') !== 'User-agent: *\nDisallow: /\n') fail('public/robots.txt must be the inert no-crawl policy');
 const functions = vercel.functions;
 if (typeof functions !== 'object' || functions === null) fail('vercel.json must define Functions');
 for (const [pattern, config] of Object.entries(functions)) {
