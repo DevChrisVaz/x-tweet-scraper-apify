@@ -35,6 +35,7 @@ if (inputSchema.properties?.searchTerms?.maxItems !== 0) fail('input schema must
 if (!Array.isArray(inputSchema.anyOf) || inputSchema.anyOf.length !== 2) fail('input schema must require fromUsers or tweetIds');
 
 const vercel = json('vercel.json');
+if (vercel.buildCommand !== null || vercel.outputDirectory !== null) fail('Vercel Functions-only config must null buildCommand and outputDirectory');
 const functions = vercel.functions;
 if (typeof functions !== 'object' || functions === null) fail('vercel.json must define Functions');
 for (const [pattern, config] of Object.entries(functions)) {

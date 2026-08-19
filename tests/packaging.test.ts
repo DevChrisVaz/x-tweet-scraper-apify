@@ -43,6 +43,12 @@ describe('fresh-clone packaging gates', () => {
     expect(functionConfig?.runtime).toBeUndefined();
   });
 
+  it('declares a Functions-only Vercel project without static build output', () => {
+    const vercel = readJson('vercel.json');
+    expect(vercel.buildCommand).toBeNull();
+    expect(vercel.outputDirectory).toBeNull();
+  });
+
   it('pins Vercel builds and functions to the documented Node 24 selector', () => {
     const packageJson = readJson('package.json');
     const engines = packageJson.engines as Record<string, unknown>;
