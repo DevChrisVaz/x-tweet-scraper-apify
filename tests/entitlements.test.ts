@@ -79,9 +79,10 @@ describe('actor emission guard', () => {
     await service.resolve({ subject: { ...subject, userId: 'other' }, maxResults: 100, isPaying: false });
     const client = new ActorEntitlementClient({
       subject,
+      platformIsPaying: false,
       maxResults: 100,
       hmacSecret: 'hmac-secret',
-      signer: async (request) => service.handleReservation(request),
+      signer: async (request) => service.handleReservation({ subject, tweetIds: request.tweetIds }),
       pinnedPublicKey: publicKey,
       now: () => 1_700_000_000_000,
     });
@@ -90,7 +91,7 @@ describe('actor emission guard', () => {
     expect(grant).toBe(true);
     expect(await guard.canEmit('tweet-1')).toBe(true);
     expect(await guard.canEmit('tweet-2')).toBe(false);
-    const failing = new EmissionGuard(new ActorEntitlementClient({ subject, maxResults: 100, hmacSecret: 'hmac-secret', signer: async () => { throw new Error('offline'); }, pinnedPublicKey: publicKey, now: () => 1_700_000_000_000 }));
+    const failing = new EmissionGuard(new ActorEntitlementClient({ subject, platformIsPaying: false, maxResults: 100, hmacSecret: 'hmac-secret', signer: async () => { throw new Error('offline'); }, pinnedPublicKey: publicKey, now: () => 1_700_000_000_000 }));
     expect(await failing.reserve('tweet-3')).toBe(false);
     expect(await failing.canEmit('tweet-3')).toBe(false);
   });
@@ -102,9 +103,10 @@ describe('actor emission guard', () => {
     await service.resolve({ subject: { ...subject, userId: 'other' }, maxResults: 100, isPaying: false });
     const client = new ActorEntitlementClient({
       subject,
+      platformIsPaying: false,
       maxResults: 100,
       hmacSecret: 'hmac-secret',
-      signer: async (request) => service.handleReservation({ ...request, subject: { ...subject, userId: 'other' } }),
+      signer: async (request) => service.handleReservation({ subject: { ...subject, userId: 'other' }, tweetIds: request.tweetIds }),
       pinnedPublicKey: publicKey,
       now: () => 1_700_000_000_000,
     });

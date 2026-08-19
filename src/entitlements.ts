@@ -9,7 +9,6 @@ import {
 import {
   EntitlementResolutionSchema,
   SignedReservationResponseSchema,
-  type BatchReservationRequest,
   type EntitlementResolution,
   type SignedDecision,
   type SignedReservationResponse,
@@ -105,6 +104,10 @@ export function canonicalRequest(method: string, path: string, timestamp: string
   return [method.toUpperCase(), path, timestamp, nonce, jsonValue(body)].join('\n');
 }
 
+export function subjectStorageKey(subject: EntitlementSubject): string {
+  return `entitlement:v1:${createHash('sha256').update(jsonValue({ actorId: subject.actorId, runId: subject.runId, userId: subject.userId }), 'utf8').digest('hex')}`;
+}
+
 function decodeSignature(value: string): Buffer {
   try {
     return Buffer.from(value, 'base64url');
@@ -121,9 +124,9 @@ function constantTimeStringEquals(left: string, right: string): boolean {
 
 function subjectFromBody(body: unknown): EntitlementSubject {
   if (typeof body !== 'object' || body === null) throw new Error('invalid request body');
-  const subject = (body as Record<string, unknown>).subject;
-  if (typeof subject !== 'object' || subject === null) throw new Error('missing subject');
-  const candidate = subject as Record<string, unknown>;
+  const record = body as Record<string, unknown>;
+  const subject = record.subject;
+  const candidate = typeof subject === 'object' && subject !== null ? subject as Record<string, unknown> : record;
   if (typeof candidate.actorId !== 'string' || typeof candidate.runId !== 'string' || typeof candidate.userId !== 'string' || !candidate.actorId || !candidate.runId || !candidate.userId) {
     throw new Error('invalid subject');
   }
@@ -154,7 +157,7 @@ export function hashTweetId(tweetId: string): string {
 }
 
 function runKey(subject: EntitlementSubject): string {
-  return `${subject.actorId}:${subject.runId}:${subject.userId}`;
+  return subjectStorageKey(subject);
 }
 
 export class InMemoryEntitlementRepository implements EntitlementRepository {
@@ -244,7 +247,7 @@ export class EntitlementService {
     return SignedReservationResponseSchema.parse(response);
   }
 
-  async handleReservation(request: Omit<BatchReservationRequest, 'issuedAt' | 'requestId' | 'signature'>): Promise<SignedReservationResponse> {
+  async handleReservation(request: { subject: EntitlementSubject; tweetIds: string[] }): Promise<SignedReservationResponse> {
     return this.reserve(request);
   }
 
@@ -268,10 +271,9 @@ export class UpstashEntitlementRepository implements EntitlementRepository {
   }
 
   async getRun(subject: EntitlementSubject): Promise<RunRecord | null> {
-    const existing = await this.command(['GET', `entitlement:${runKey(subject)}`]) as string | null;
+    const existing = await this.command(['GET', runKey(subject)]) as string | null;
     if (!existing) return null;
-    const parsed = JSON.parse(existing) as Omit<RunRecord, 'grantedHashes'> & { grantedHashes: string[] };
-    return { ...parsed, grantedHashes: new Set(parsed.grantedHashes) };
+    return this.deserializeRun(existing);
   }
 
   async claimNonce(nonce: string, ttlSeconds: number): Promise<boolean> {
@@ -280,13 +282,10 @@ export class UpstashEntitlementRepository implements EntitlementRepository {
   }
 
   async getOrCreateRun(input: { subject: EntitlementSubject; tier: RunRecord['tier']; effectiveLimit: number; issuedAt: string; expiresAt: string }): Promise<RunRecord> {
-    const key = `entitlement:${runKey(input.subject)}`;
+    const key = runKey(input.subject);
     const existing = await this.command(['GET', key]) as string | null;
-    if (existing) {
-      const parsed = JSON.parse(existing) as Omit<RunRecord, 'grantedHashes'> & { grantedHashes: string[] };
-      return { ...parsed, grantedHashes: new Set(parsed.grantedHashes) };
-    }
-    const run: Omit<RunRecord, 'grantedHashes'> & { grantedHashes: string[] } = { ...input, reserved: 0, grantedHashes: [] };
+    if (existing) return this.deserializeRun(existing);
+    const run: Omit<RunRecord, 'grantedHashes'> & { granted: Record<string, true> } = { ...input, reserved: 0, granted: {} };
     const created = await this.command(['SET', key, JSON.stringify(run), 'NX', 'EX', ENTITLEMENT_TTL_SECONDS]) as string | null;
     if (created !== 'OK') return this.getOrCreateRun(input);
     return { ...run, grantedHashes: new Set() };
@@ -294,12 +293,18 @@ export class UpstashEntitlementRepository implements EntitlementRepository {
 
   async reserve(input: { subject: EntitlementSubject; hashes: string[]; effectiveLimit: number; expiresAt: string; now?: number }): Promise<{ grantedHashes: string[]; decisions: boolean[] }> {
     if (input.hashes.length > MAX_RESERVATION_BATCH) throw new Error('reservation batch exceeds 20 IDs');
-    const key = `entitlement:${runKey(input.subject)}`;
-    const script = `local raw = redis.call('GET', KEYS[1]); if not raw then return redis.error_reply('missing entitlement') end; local run = cjson.decode(raw); local granted = {}; local decisions = {}; for i=1,#ARGV do local h=ARGV[i]; if run.granted[h] then granted[#granted+1]=h; decisions[#decisions+1]='1'; elseif tonumber(run.reserved) < tonumber(run.effectiveLimit) then run.reserved=tonumber(run.reserved)+1; run.granted[h]=true; granted[#granted+1]=h; decisions[#decisions+1]='1'; else decisions[#decisions+1]='0'; end end; redis.call('SET', KEYS[1], cjson.encode(run), 'KEEPTTL'); return {cjson.encode(granted), table.concat(decisions, ',')}`;
+    const key = runKey(input.subject);
+    const script = `local raw = redis.call('GET', KEYS[1]); if not raw then return redis.error_reply('missing entitlement') end; local run = cjson.decode(raw); run.granted = run.granted or {}; if run.grantedHashes then for _,h in ipairs(run.grantedHashes) do run.granted[h] = true end; run.grantedHashes = nil end; local granted = {}; local decisions = {}; for i=1,#ARGV do local h=ARGV[i]; if run.granted[h] then granted[#granted+1]=h; decisions[#decisions+1]='1'; elseif tonumber(run.reserved) < tonumber(run.effectiveLimit) then run.reserved=tonumber(run.reserved)+1; run.granted[h]=true; granted[#granted+1]=h; decisions[#decisions+1]='1'; else decisions[#decisions+1]='0'; end end; redis.call('SET', KEYS[1], cjson.encode(run), 'KEEPTTL'); return {cjson.encode(granted), table.concat(decisions, ',')}`;
     const result = await this.command(['EVAL', script, '1', key, ...input.hashes]) as [string, string];
     const grantedHashes = JSON.parse(result[0] ?? '[]') as string[];
     const decisions = (result[1] ?? '').split(',').map((value) => value === '1');
     return { grantedHashes, decisions };
+  }
+
+  private deserializeRun(existing: string): RunRecord {
+    const parsed = JSON.parse(existing) as Omit<RunRecord, 'grantedHashes'> & { granted?: Record<string, true>; grantedHashes?: string[] };
+    const hashes = parsed.granted ? Object.keys(parsed.granted) : parsed.grantedHashes ?? [];
+    return { ...parsed, grantedHashes: new Set(hashes) };
   }
 }
 

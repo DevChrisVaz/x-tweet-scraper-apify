@@ -134,6 +134,17 @@ const SubjectSchema = z
   })
   .strict();
 
+export const EntitlementResolutionRequestSchema = z
+  .object({
+    version: z.literal(1),
+    actorId: id,
+    runId: id,
+    userId: id,
+    platformIsPaying: z.boolean(),
+    requestedMaxResults: z.number().int().min(1).max(10_000),
+  })
+  .strict();
+
 export const EntitlementResolutionSchema = z
   .object({
     subject: SubjectSchema,
@@ -159,11 +170,12 @@ export const SignedDecisionSchema = z
 
 export const BatchReservationRequestSchema = z
   .object({
-    subject: SubjectSchema,
+    version: z.literal(1),
+    actorId: id,
+    runId: id,
+    userId: id,
     tweetIds: z.array(id).min(1).max(20),
     requestId: id,
-    issuedAt: utcTimestamp,
-    signature: nonEmptyString,
   })
   .strict()
   .refine((request) => new Set(request.tweetIds).size === request.tweetIds.length, {
@@ -184,6 +196,7 @@ export const SignedReservationResponseSchema = z
 export type ActorInput = z.infer<typeof ActorInputSchema>;
 export type TweetOutput = z.infer<typeof TweetOutputSchema>;
 export type EntitlementResolution = z.infer<typeof EntitlementResolutionSchema>;
+export type EntitlementResolutionRequest = z.infer<typeof EntitlementResolutionRequestSchema>;
 export type SignedDecision = z.infer<typeof SignedDecisionSchema>;
 export type BatchReservationRequest = z.infer<typeof BatchReservationRequestSchema>;
 export type SignedReservationResponse = z.infer<typeof SignedReservationResponseSchema>;

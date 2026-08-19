@@ -1,11 +1,9 @@
-import { BatchReservationRequestSchema } from './contracts.js';
+import { BatchReservationRequestSchema, EntitlementResolutionRequestSchema } from './contracts.js';
 import { EntitlementService, verifyRequest, type AuthenticatedRequest, type EntitlementRepository } from './entitlements.js';
-import { payingFromActorEnv } from './emission.js';
 
 export interface EntitlementHandlerConfig {
   secret: string;
   canonicalActorId: string;
-  platformEnv: Record<string, unknown>;
   repository: EntitlementRepository;
   service: EntitlementService;
   replayedNonces?: Set<string>;
@@ -39,10 +37,8 @@ export function createEntitlementHandlers(config: EntitlementHandlerConfig): {
       try {
         const authenticated = await verifyRequest(await requestFromWeb(request), { secret: config.secret, replayedNonces, ...(config.repository.claimNonce ? { claimNonce: (nonce, ttl) => config.repository.claimNonce!(nonce, ttl) } : {}), ...(config.now === undefined ? {} : { now: config.now }) });
         assertCanonicalActor(authenticated.subject, config);
-        const body = authenticated.body;
-        const maxResults = body.maxResults;
-        if (typeof maxResults !== 'number') throw new Error('invalid maxResults');
-        const resolution = await config.service.resolve({ subject: authenticated.subject, maxResults, isPaying: payingFromActorEnv(config.platformEnv) });
+        const body = EntitlementResolutionRequestSchema.parse(authenticated.body);
+        const resolution = await config.service.resolve({ subject: authenticated.subject, maxResults: body.requestedMaxResults, isPaying: body.platformIsPaying });
         return Response.json(resolution);
       } catch (error) {
         console.error('entitlement resolve failed', error instanceof Error ? error.message : 'unknown error');
@@ -54,7 +50,7 @@ export function createEntitlementHandlers(config: EntitlementHandlerConfig): {
         const authenticated = await verifyRequest(await requestFromWeb(request), { secret: config.secret, replayedNonces, ...(config.repository.claimNonce ? { claimNonce: (nonce, ttl) => config.repository.claimNonce!(nonce, ttl) } : {}), ...(config.now === undefined ? {} : { now: config.now }) });
         assertCanonicalActor(authenticated.subject, config);
         const parsed = BatchReservationRequestSchema.parse(authenticated.body);
-        const response = await config.service.handleReservation(parsed);
+        const response = await config.service.handleReservation({ subject: authenticated.subject, tweetIds: parsed.tweetIds });
         return Response.json(response);
       } catch (error) {
         console.error('entitlement reservation failed', error instanceof Error ? error.message : 'unknown error');

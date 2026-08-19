@@ -20,5 +20,5 @@ export function getEntitlementHandlers() {
   if (!privateKey || !secret || !url || !token || !actorId) throw new Error('entitlement service configuration is incomplete');
   const repository = new UpstashEntitlementRepository(url, token);
   const service = new EntitlementService(repository, { signingPrivateKey: privateKeyFromEnvironment(privateKey), signingKeyId: keyId });
-  return createEntitlementHandlers({ secret, canonicalActorId: actorId, platformEnv: process.env, repository, service });
+  return createEntitlementHandlers({ secret, canonicalActorId: actorId, repository, service });
 }

@@ -1,42 +1,56 @@
-import { createHmac, createPublicKey, verify as verifySignature, type KeyObject } from 'node:crypto';
+import { createHmac, createPublicKey, randomUUID, verify as verifySignature, type KeyObject } from 'node:crypto';
 import { canonicalRequest, hashTweetId, type EntitlementSubject } from './entitlements.js';
 import type { EntitlementResolution, SignedDecision, SignedReservationResponse } from './contracts.js';
 
 export interface ReservationCall {
-  subject: EntitlementSubject;
+  version: 1;
+  actorId: string;
+  runId: string;
+  userId: string;
   tweetIds: string[];
   requestId: string;
-  issuedAt: string;
-  signature: string;
+}
+
+export interface ResolutionCall {
+  version: 1;
+  actorId: string;
+  runId: string;
+  userId: string;
+  platformIsPaying: boolean;
+  requestedMaxResults: number;
 }
 
 export interface ActorEntitlementClientOptions {
   subject: EntitlementSubject;
+  platformIsPaying: boolean;
   maxResults: number;
-  signer: (request: ReservationCall) => Promise<SignedReservationResponse>;
-  resolver?: (request: { subject: EntitlementSubject; maxResults: number; timestamp: string; nonce: string; signature: string }) => Promise<EntitlementResolution>;
+  signer?: (request: ReservationCall) => Promise<SignedReservationResponse>;
+  resolver?: (request: ResolutionCall) => Promise<EntitlementResolution>;
+  endpoint?: string;
+  fetcher?: typeof fetch;
   hmacSecret: string;
   pinnedPublicKey: string | KeyObject;
   pinnedKeyId?: string;
   now?: () => number;
 }
 
-export async function createPlatformEntitlementClient(options: Omit<ActorEntitlementClientOptions, 'subject'>): Promise<ActorEntitlementClient> {
+export async function createPlatformEntitlementClient(options: Omit<ActorEntitlementClientOptions, 'subject' | 'platformIsPaying'>): Promise<ActorEntitlementClient> {
   const { Actor } = await import('apify');
   const env = Actor.getEnv() as unknown as Record<string, unknown>;
-  return new ActorEntitlementClient({ ...options, subject: subjectFromActorEnv(env) });
+  const identity = platformEntitlementIdentity(env);
+  return new ActorEntitlementClient({ ...options, subject: identity.subject, platformIsPaying: identity.isPaying });
 }
 
 export function subjectFromActorEnv(env: Record<string, unknown>): EntitlementSubject {
-  const actorId = env.APIFY_ACTOR_ID ?? env.actorId;
-  const runId = env.APIFY_ACTOR_RUN_ID ?? env.actorRunId ?? env.runId;
-  const userId = env.APIFY_USER_ID ?? env.userId;
+  const actorId = env.actorId ?? env.APIFY_ACTOR_ID;
+  const runId = env.actorRunId ?? env.runId ?? env.APIFY_ACTOR_RUN_ID;
+  const userId = env.userId;
   if (typeof actorId !== 'string' || typeof runId !== 'string' || typeof userId !== 'string' || !actorId || !runId || !userId) throw new Error('missing platform entitlement identity');
   return { actorId, runId, userId };
 }
 
 export function payingFromActorEnv(env: Record<string, unknown>): boolean {
-  const value = env.APIFY_USER_IS_PAYING ?? env.userIsPaying;
+  const value = env.APIFY_USER_IS_PAYING;
   return value === true || value === 'true' || value === '1';
 }
 
@@ -84,24 +98,23 @@ export class ActorEntitlementClient {
 
   constructor(private readonly options: ActorEntitlementClientOptions) {
     if (!Number.isSafeInteger(options.maxResults) || options.maxResults < 1 || options.maxResults > 10_000) throw new Error('invalid maxResults');
+    if (typeof options.platformIsPaying !== 'boolean') throw new Error('missing platform payer identity');
+    if (!options.signer && !options.endpoint) throw new Error('entitlement endpoint is not configured');
     this.key = keyFromPinned(options.pinnedPublicKey);
     this.now = options.now ?? Date.now;
   }
 
   async reserve(tweetIds: string[]): Promise<SignedReservationResponse> {
     if (tweetIds.length < 1 || tweetIds.length > 20 || new Set(tweetIds).size !== tweetIds.length) throw new Error('reservation batches must contain 1..20 unique IDs');
-    const issuedAt = new Date(this.now()).toISOString();
-    const requestBody = { subject: this.options.subject, tweetIds };
-    const nonce = `${this.options.subject.runId}:${issuedAt}:${tweetIds[0] ?? ''}`;
-    const timestamp = String(this.now());
-    const requestId = `${this.options.subject.runId}:${tweetIds.map(hashTweetId).join(',')}`;
-    const request: ReservationCall = {
-      ...requestBody,
-      requestId,
-      issuedAt,
-      signature: createHmac('sha256', this.options.hmacSecret).update(canonicalRequest('POST', '/entitlements/reserve', timestamp, nonce, { ...requestBody, requestId, issuedAt })).digest('base64url'),
+    const body: ReservationCall = {
+      version: 1,
+      actorId: this.options.subject.actorId,
+      runId: this.options.subject.runId,
+      userId: this.options.subject.userId,
+      tweetIds,
+      requestId: `${this.options.subject.runId}:${tweetIds.map(hashTweetId).join(',')}`,
     };
-    const response = await this.options.signer(request);
+    const response = this.options.signer ? await this.options.signer(body) : await this.post<SignedReservationResponse>('/entitlements/reserve', body);
     this.validateResponse(response);
     return response;
   }
@@ -112,11 +125,15 @@ export class ActorEntitlementClient {
   }
 
   async resolve(): Promise<EntitlementResolution> {
-    if (!this.options.resolver) throw new Error('entitlement resolver is not configured');
-    const timestamp = String(this.now());
-    const nonce = `${this.options.subject.runId}:resolve:${timestamp}`;
-    const payload = { subject: this.options.subject, maxResults: this.options.maxResults };
-    const resolution = await this.options.resolver({ ...payload, timestamp, nonce, signature: createHmac('sha256', this.options.hmacSecret).update(canonicalRequest('POST', '/entitlements/resolve', timestamp, nonce, payload)).digest('base64url') });
+    const body: ResolutionCall = {
+      version: 1,
+      actorId: this.options.subject.actorId,
+      runId: this.options.subject.runId,
+      userId: this.options.subject.userId,
+      platformIsPaying: this.options.platformIsPaying,
+      requestedMaxResults: this.options.maxResults,
+    };
+    const resolution = this.options.resolver ? await this.options.resolver(body) : await this.post<EntitlementResolution>('/entitlements/resolve', body);
     if (this.options.pinnedKeyId !== undefined && resolution.keyId !== this.options.pinnedKeyId) throw new Error('unexpected signing key');
     if (resolution.subject.actorId !== this.options.subject.actorId || resolution.subject.runId !== this.options.subject.runId || resolution.subject.userId !== this.options.subject.userId) throw new Error('signed resolution subject mismatch');
     if (Date.parse(resolution.expiresAt) <= this.now()) throw new Error('signed resolution expired');
@@ -126,6 +143,23 @@ export class ActorEntitlementClient {
     delete payloadToVerify.keyId;
     if (!verifySigned(payloadToVerify, signature, this.key)) throw new Error('invalid resolution signature');
     return resolution;
+  }
+
+  private async post<T>(path: string, body: unknown): Promise<T> {
+    const endpoint = this.options.endpoint;
+    if (!endpoint) throw new Error('entitlement endpoint is not configured');
+    const timestamp = String(this.now());
+    const nonce = randomUUID();
+    const signature = createHmac('sha256', this.options.hmacSecret).update(canonicalRequest('POST', path, timestamp, nonce, body)).digest('base64url');
+    const fetcher = this.options.fetcher ?? fetch;
+    const response = await fetcher(`${endpoint.replace(/\/$/, '')}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-entitlement-timestamp': timestamp, 'x-entitlement-nonce': nonce, 'x-entitlement-signature': signature },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json() as T | { error?: string };
+    if (!response.ok) throw new Error(typeof payload === 'object' && payload !== null && 'error' in payload && typeof payload.error === 'string' ? payload.error : `entitlement request failed (${response.status})`);
+    return payload as T;
   }
 
   private validateResponse(response: SignedReservationResponse): void {
