@@ -1,6 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "X Tweet Scraper dataset item",
+  "actorSpecification": 1,
   "$ref": "#/definitions/tweet",
   "definitions": {
     "nullableId": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },

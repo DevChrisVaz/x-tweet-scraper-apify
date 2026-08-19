@@ -60,6 +60,7 @@ export function createStickyProxyFetch(proxyUrl: string, request: StickyProxyReq
     });
     const responseHeaders = new Headers();
     for (const [name, value] of Object.entries(result.headers)) {
+      if (name.startsWith(':')) continue;
       if (Array.isArray(value)) for (const item of value) responseHeaders.append(name, item);
       else if (value !== undefined) responseHeaders.set(name, value);
     }

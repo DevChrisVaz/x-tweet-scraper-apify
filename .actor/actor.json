@@ -5,7 +5,9 @@
   "version": "0.1",
   "dockerfile": "../Dockerfile",
   "input": "../INPUT_SCHEMA.json",
-  "storages": {
-    "dataset": "../OUTPUT_SCHEMA.json"
+  "environmentVariables": {
+    "ENTITLEMENT_ENDPOINT": "@ENTITLEMENT_ENDPOINT",
+    "ENTITLEMENT_HMAC_SECRET": "@ENTITLEMENT_HMAC_SECRET",
+    "ENTITLEMENT_PUBLIC_KEY": "@ENTITLEMENT_PUBLIC_KEY"
   }
 }

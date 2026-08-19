@@ -39,7 +39,7 @@ export async function createApifyPersistence(actor: ApifyPersistenceApi): Promis
     save: async (next) => {
       if (next !== state) Object.assign(state, next);
     },
-    writeOutput: async (metadata) => actor.setValue(OUTPUT.name, metadata, { contentType: OUTPUT.contentType }),
+    writeOutput: async (metadata) => actor.setValue(OUTPUT.name, metadata),
   };
 }
 
@@ -109,7 +109,7 @@ async function writeMinimalFailClosedOutput(actor: ApifyPersistenceApi, env: Rec
     statistics: { ...createEmptyStatistics(), errors: 1 },
     completedAt: new Date().toISOString(),
   });
-  await actor.setValue(OUTPUT.name, metadata, { contentType: OUTPUT.contentType });
+  await actor.setValue(OUTPUT.name, metadata);
 }
 
 export async function runApifyActorWithRuntime(actor: ActorRuntimeApi): Promise<void> {

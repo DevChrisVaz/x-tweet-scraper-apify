@@ -1,37 +1,126 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "X Tweet Scraper input",
+  "schemaVersion": 1,
   "type": "object",
-  "additionalProperties": false,
   "properties": {
-    "fromUsers": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] },
-    "tweetIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] },
-    "searchTerms": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 0, "default": [], "description": "Unsupported; the platform boundary rejects non-empty values." },
-    "hashtags": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] },
-    "since": { "type": "string", "description": "ISO-8601 date or timestamp, inclusive." },
-    "until": { "type": "string", "description": "ISO-8601 date or timestamp, inclusive." },
-    "language": { "type": "string", "pattern": "^[A-Za-z]{2}$" },
-    "minLikes": { "type": "integer", "minimum": 0 },
-    "minRetweets": { "type": "integer", "minimum": 0 },
-    "minReplies": { "type": "integer", "minimum": 0 },
-    "onlyVerified": { "type": "boolean", "default": false },
-    "mediaType": { "type": "string", "enum": ["any", "text_only", "images", "video", "links"], "default": "any" },
-    "includeReplies": { "type": "boolean", "default": true },
-    "includeRetweets": { "type": "boolean", "default": false },
-    "sortBy": { "type": "string", "enum": ["latest"], "default": "latest" },
-    "maxResults": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 100 },
+    "fromUsers": {
+      "title": "Target Users",
+      "description": "Array of X usernames to scrape.",
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "editor": "stringList"
+    },
+    "tweetIds": {
+      "title": "Tweet IDs",
+      "description": "Array of specific Tweet IDs to scrape.",
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "editor": "stringList"
+    },
+    "searchTerms": {
+      "title": "Search Terms",
+      "description": "Unsupported.",
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "editor": "stringList"
+    },
+    "hashtags": {
+      "title": "Hashtags",
+      "description": "Array of hashtags to scrape.",
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "editor": "stringList"
+    },
+    "since": {
+      "title": "Since Date",
+      "description": "ISO-8601 date or timestamp, inclusive.",
+      "type": "string",
+      "editor": "textfield"
+    },
+    "until": {
+      "title": "Until Date",
+      "description": "ISO-8601 date or timestamp, inclusive.",
+      "type": "string",
+      "editor": "textfield"
+    },
+    "language": {
+      "title": "Language",
+      "description": "Language code of the tweets.",
+      "type": "string",
+      "editor": "textfield"
+    },
+    "minLikes": {
+      "title": "Minimum Likes",
+      "description": "Minimum number of likes.",
+      "type": "integer",
+      "editor": "number"
+    },
+    "minRetweets": {
+      "title": "Minimum Retweets",
+      "description": "Minimum number of retweets.",
+      "type": "integer",
+      "editor": "number"
+    },
+    "minReplies": {
+      "title": "Minimum Replies",
+      "description": "Minimum number of replies.",
+      "type": "integer",
+      "editor": "number"
+    },
+    "onlyVerified": {
+      "title": "Only Verified",
+      "description": "Only scrape tweets from verified users.",
+      "type": "boolean",
+      "default": false,
+      "editor": "checkbox"
+    },
+    "mediaType": {
+      "title": "Media Type",
+      "description": "Filter tweets by media type.",
+      "type": "string",
+      "enum": ["any", "text_only", "images", "video", "links"],
+      "default": "any",
+      "editor": "select"
+    },
+    "includeReplies": {
+      "title": "Include Replies",
+      "description": "Include replies in the scraped tweets.",
+      "type": "boolean",
+      "default": true,
+      "editor": "checkbox"
+    },
+    "includeRetweets": {
+      "title": "Include Retweets",
+      "description": "Include retweets in the scraped tweets.",
+      "type": "boolean",
+      "default": false,
+      "editor": "checkbox"
+    },
+    "sortBy": {
+      "title": "Sort By",
+      "description": "Sort order of the tweets.",
+      "type": "string",
+      "enum": ["latest"],
+      "default": "latest",
+      "editor": "select"
+    },
+    "maxResults": {
+      "title": "Maximum Results",
+      "description": "Maximum number of results to return.",
+      "type": "integer",
+      "default": 100,
+      "editor": "number"
+    },
     "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "description": "Proxy configuration to use.",
       "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "useApifyProxy": { "type": "boolean", "default": false },
-        "apifyProxyGroups": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "apifyProxyCountry": { "type": "string", "minLength": 1 }
-      }
+      "editor": "proxy"
     }
-  },
-  "anyOf": [
-    { "required": ["fromUsers"], "properties": { "fromUsers": { "minItems": 1 } } },
-    { "required": ["tweetIds"], "properties": { "tweetIds": { "minItems": 1 } } }
-  ]
+  }
 }
