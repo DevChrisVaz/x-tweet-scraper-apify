@@ -23,7 +23,15 @@ const prohibited = [
   /^nightwatch(?:$|-)/i,
   /^testcafe(?:$|-)/i,
 ];
-const found = packages.filter((name) => prohibited.some((pattern) => pattern.test(name.replace(/^node_modules\//, ''))));
+function packageSegments(lockPath) {
+  const normalized = lockPath.replace(/^node_modules\//, '');
+  return normalized.split('/node_modules/').map((segment) => {
+    const parts = segment.split('/');
+    return parts[0]?.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0] ?? '';
+  });
+}
+
+const found = packages.filter((name) => packageSegments(name).some((packageName) => prohibited.some((pattern) => pattern.test(packageName))));
 
 if (found.length > 0) {
   console.error(`Browser-engine dependencies are prohibited: ${found.join(', ')}`);

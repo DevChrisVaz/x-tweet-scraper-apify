@@ -52,6 +52,8 @@ describe('fresh-clone packaging gates', () => {
     const names = [
       'chrome-aws-lambda',
       '@sparticuz/chromium',
+      'node_modules/example/node_modules/chrome-aws-lambda',
+      'node_modules/example/node_modules/@sparticuz/chromium',
       'playwright-extra',
       'puppeteer-extra',
       'webdriverio',
