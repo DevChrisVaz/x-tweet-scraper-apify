@@ -1,7 +1,5 @@
 import { getEntitlementHandlers } from '../../src/vercel-entitlements.js';
 
-export const runtime = 'nodejs24.x';
-
 export async function POST(request: Request): Promise<Response> {
   try {
     return await getEntitlementHandlers().reserve(request);

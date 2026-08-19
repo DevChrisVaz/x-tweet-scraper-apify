@@ -59,7 +59,7 @@ The live commands are opt-in and HTTP-only. They require explicit targets and co
 
 ## Deployment
 
-The production Actor is built by Dockerfile from Node 24 and starts dist/index.js. .actor/actor.json points to that Dockerfile and the checked-in input/dataset schemas. The Vercel Functions in api/entitlements/ are configured in vercel.json for nodejs24.x and Fluid Compute-compatible Node execution; they are not Edge Functions.
+The production Actor is built by Dockerfile from Node 24 and starts dist/index.js. .actor/actor.json points to that Dockerfile and the checked-in input/dataset schemas. The Vercel Functions in api/entitlements/ use the supported default Node.js runtime (with a 300-second limit) in vercel.json; package.json pins deployments to Node 24 and they are not Edge Functions.
 
 The intended/provisioned names are Vercel project x-tweet-scraper-entitlements and Marketplace resource upstash-kv-cordovan-village. Connection of that resource, secret configuration, Vercel deployment, and Apify deployment remain Task 6 actions; this worktree makes no deployment claim. The Marketplace normally injects KV_REST_API_URL and KV_REST_API_TOKEN. The signer accepts those names and falls back to UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN; when both mappings exist, the UPSTASH_REDIS_REST_* aliases take precedence. The example contains names and harmless placeholders only; private keys, HMACs, REST tokens, and .env.local values must never be committed or printed. The Actor receives only its endpoint, HMAC, and pinned public key through the deployment secret mechanism; payer status continues to come from Apify runtime identity.
 

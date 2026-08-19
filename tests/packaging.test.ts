@@ -34,6 +34,28 @@ describe('fresh-clone packaging gates', () => {
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
+  it('uses the valid default Node.js runtime instead of a legacy runtime tag', () => {
+    const vercel = readJson('vercel.json');
+    const functions = vercel.functions as Record<string, Record<string, unknown>>;
+    const functionConfig = functions['api/**/*.ts'];
+    expect(functionConfig).toEqual({ maxDuration: 300 });
+    expect(JSON.stringify(vercel)).not.toContain('nodejs24.x');
+    expect(functionConfig?.runtime).toBeUndefined();
+  });
+
+  it('pins Vercel builds and functions to the documented Node 24 selector', () => {
+    const packageJson = readJson('package.json');
+    const engines = packageJson.engines as Record<string, unknown>;
+    expect(engines.node).toBe('24.x');
+  });
+
+  it('does not export unsupported runtime metadata from raw API modules', () => {
+    for (const path of ['api/entitlements/resolve.ts', 'api/entitlements/reserve.ts']) {
+      const source = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+      expect(source).not.toMatch(/export const runtime\s*=/);
+    }
+  });
+
   it('requires the supported top-level Apify Dockerfile field', () => {
     const actor = readJson('.actor/actor.json');
     expect(actor.dockerfile).toBe('../Dockerfile');

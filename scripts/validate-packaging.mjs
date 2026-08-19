@@ -38,9 +38,17 @@ const vercel = json('vercel.json');
 const functions = vercel.functions;
 if (typeof functions !== 'object' || functions === null) fail('vercel.json must define Functions');
 for (const [pattern, config] of Object.entries(functions)) {
-  if (typeof config !== 'object' || config === null || config.runtime !== 'nodejs24.x') fail(`Vercel Function ${pattern} must use nodejs24.x`);
+  if (typeof config !== 'object' || config === null || config.runtime !== undefined || config.maxDuration !== 300) {
+    fail(`Vercel Function ${pattern} must use the default Node.js runtime with a 300-second limit`);
+  }
 }
 if (/edge/i.test(JSON.stringify(vercel))) fail('Edge runtime is prohibited for entitlement Functions');
+if (JSON.stringify(vercel).includes('nodejs24.x')) fail('Vercel config must not use the invalid nodejs24.x runtime tag');
+const packageEngines = json('package.json').engines;
+if (packageEngines?.node !== '24.x') fail('package.json must pin Vercel builds and Functions to Node 24.x');
+for (const path of ['api/entitlements/resolve.ts', 'api/entitlements/reserve.ts']) {
+  if (/export\s+const\s+runtime\s*=/.test(text(path))) fail(`${path} must use the default Node.js runtime without route metadata`);
+}
 
 const eslint = text('eslint.config.mjs');
 if (!eslint.includes("'**/.worktrees/**'") || !eslint.includes("'**/dist/**'")) fail('ESLint must ignore nested worktrees and generated dist directories');
@@ -63,4 +71,4 @@ for (const identifier of ['x-tweet-scraper-entitlements', 'upstash-kv-cordovan-v
 const dependencyCheck = spawnSync(process.execPath, ['scripts/check-browser-deps.mjs'], { cwd: new URL('..', import.meta.url), encoding: 'utf8' });
 if (dependencyCheck.status !== 0) fail(dependencyCheck.stderr || dependencyCheck.stdout || 'browser dependency check failed');
 
-console.log('Packaging validation passed: Docker, Apify manifest, Vercel Node 24 Functions, ESLint ignores, and dependency policy.');
+console.log('Packaging validation passed: Docker, Apify manifest, Vercel Node.js Functions, ESLint ignores, and dependency policy.');
