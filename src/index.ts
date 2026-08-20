@@ -169,7 +169,7 @@ export async function runApifyActorWithRuntime(actor: ActorRuntimeApi): Promise<
     } catch (outputError) {
       log.error('Unable to write fail-closed Actor OUTPUT', { message: outputError instanceof Error ? outputError.message : 'unknown error' });
     }
-    if (invalidInput) throw error;
+    console.error(error); if (invalidInput) throw error;
   } finally {
     await actor.exit();
   }

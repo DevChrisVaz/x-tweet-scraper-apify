@@ -928,13 +928,14 @@ export function normalizeTweet(raw: unknown, scrapedAt = new Date().toISOString(
   const tweet = unwrapTweet(result);
   const legacy = asRecord(tweet.legacy);
   const user = asRecord(asRecord(asRecord(tweet.core)?.user_results)?.result);
-  const author = asRecord(user?.legacy);
+  const authorLegacy = asRecord(user?.legacy);
+  const authorCore = asRecord(user?.core);
   const id = stringAt(tweet, 'rest_id');
-  const username = stringAt(author, 'screen_name');
-  const name = stringAt(author, 'name');
+  const username = stringAt(authorLegacy, 'screen_name') ?? stringAt(authorCore, 'screen_name');
+  const name = stringAt(authorLegacy, 'name') ?? stringAt(authorCore, 'name');
   const authorId = stringAt(user, 'rest_id');
   const created = typeof legacy?.created_at === 'string' ? new Date(legacy.created_at) : undefined;
-  if (legacy === undefined || user === undefined || author === undefined || id === undefined || username === undefined || name === undefined || authorId === undefined || created === undefined || Number.isNaN(created.valueOf())) {
+  if (legacy === undefined || user === undefined || id === undefined || username === undefined || name === undefined || authorId === undefined || created === undefined || Number.isNaN(created.valueOf())) {
     throw new GraphqlShapeError('tweet result is missing required tweet or author fields');
   }
   const noteResult = asRecord(asRecord(asRecord(legacy.note_tweet)?.note_tweet_results)?.result);
@@ -962,9 +963,9 @@ export function normalizeTweet(raw: unknown, scrapedAt = new Date().toISOString(
       id: authorId,
       username,
       name,
-      verified: author.verified === true || author.is_blue_verified === true || user.is_blue_verified === true,
-      followers: integer(author.followers_count),
-      following: integer(author.friends_count),
+      verified: authorLegacy?.verified === true || authorLegacy?.is_blue_verified === true || user.is_blue_verified === true,
+      followers: authorLegacy?.followers_count !== undefined ? integer(authorLegacy.followers_count) : integer(asRecord(user.relationship_counts)?.followers),
+      following: authorLegacy?.friends_count !== undefined ? integer(authorLegacy.friends_count) : integer(asRecord(user.relationship_counts)?.following),
     },
     metrics: {
       likes: integer(legacy.favorite_count),
