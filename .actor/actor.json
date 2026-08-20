@@ -5,6 +5,22 @@
   "version": "0.1",
   "dockerfile": "../Dockerfile",
   "input": "../INPUT_SCHEMA.json",
+  "storages": {
+    "dataset": {
+      "actorSpecification": 1,
+      "views": {
+        "overview": {
+          "title": "Overview",
+          "transformation": {
+            "fields": ["id", "url", "text", "author", "createdAt", "metrics"]
+          },
+          "display": {
+            "component": "table"
+          }
+        }
+      }
+    }
+  },
   "environmentVariables": {
     "ENTITLEMENT_ENDPOINT": "@ENTITLEMENT_ENDPOINT",
     "ENTITLEMENT_HMAC_SECRET": "@ENTITLEMENT_HMAC_SECRET",
