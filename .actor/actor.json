@@ -6,20 +6,7 @@
   "dockerfile": "../Dockerfile",
   "input": "../INPUT_SCHEMA.json",
   "storages": {
-    "dataset": {
-      "actorSpecification": 1,
-      "views": {
-        "overview": {
-          "title": "Overview",
-          "transformation": {
-            "fields": ["id", "url", "text", "author", "createdAt", "metrics"]
-          },
-          "display": {
-            "component": "table"
-          }
-        }
-      }
-    }
+    "dataset": "./dataset_schema.json"
   },
   "environmentVariables": {
     "ENTITLEMENT_ENDPOINT": "@ENTITLEMENT_ENDPOINT",

@@ -1,0 +1,15 @@
+{
+  "actorSpecification": 1,
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "description": "Default view of the output dataset",
+      "transformation": {
+        "fields": ["id", "url", "text", "author", "createdAt", "metrics"]
+      },
+      "display": {
+        "component": "table"
+      }
+    }
+  }
+}
