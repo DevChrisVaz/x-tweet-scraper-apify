@@ -37,6 +37,33 @@ Supported HTTP-only surfaces are:
 
 Quote/reply/retweet metadata may be normalized when present in a returned tweet, but a separate search endpoint is not promised. X operation IDs are discovered from the public manifest and verified bootstrap IDs are retained as a fallback. A build-key change invalidates the cache; operation drift receives one discovery refresh and then fails closed.
 
+
+
+
+
+## Authentication and Anti-Scraping Bypasses
+
+X (Twitter) heavily throttles and restricts standard Guest Sessions, frequently blocking requests with `422 Unprocessable Entity`, `401 Unauthorized`, or `403 Forbidden` errors. The platform increasingly requires valid, logged-in session cookies to successfully resolve GraphQL endpoints such as `UserTweets` and `UserByScreenName`.
+
+To bypass these blocks, this scraper supports an **authenticated session mode** using the optional `authCookies` input.
+
+### Configuring `authCookies`
+
+If provided in your Apify input, `authCookies` must be an array of strings representing your session cookies (specifically, you must provide your `auth_token` and `ct0` cookies). The scraper's session manager will use these cookies to dynamically mimic an authenticated user, automatically refresh the required `x-csrf-token` (the `ct0` cookie) when necessary, and adapt the GraphQL payloads to the authenticated JSON shape.
+
+**Example Input configuration:**
+
+```json
+{
+  "authCookies": [
+    "auth_token=d5ff4a...; ct0=e78c4b..."
+  ]
+}
+```
+
+**⚠️ IMPORTANT WARNING:** 
+Scraping X while logged into an account poses a significant risk to that account. X actively monitors for automated behavior, and using your primary personal account for scraping **will likely result in a permanent ban**. You must **ONLY** use throwaway/burner accounts for the `authCookies` input.
+
 ## Entitlement and security model
 
 Only Apify's platform-controlled Actor.getEnv() fields are trusted for identity and payer status: actorId, actorRunId, userId, and the documented userIsPaying value "1". Input fields, user environment, and a caller-provided override cannot assert a paid tier. The Vercel Function never reads a deployment-global payer bit. Missing identity, an unrecognized payer value, signer outage, invalid HMAC, replay, actor mismatch, invalid Ed25519 signature, expired grant, or Redis mutation failure freezes the run to free/unknown and prevents unreserved emission.
