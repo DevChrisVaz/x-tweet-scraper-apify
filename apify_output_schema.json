@@ -1,0 +1,31 @@
+{
+  "actorSpecification": 1,
+  "actorOutputSchemaVersion": 1,
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "title": "Tweet ID",
+      "description": "Unique identifier of the tweet",
+      "template": "1234567890"
+    },
+    "url": {
+      "type": "string",
+      "title": "URL",
+      "description": "URL of the tweet",
+      "template": "https://twitter.com/x/status/1234567890"
+    },
+    "text": {
+      "type": "string",
+      "title": "Text",
+      "description": "Content of the tweet",
+      "template": "Hello world!"
+    },
+    "createdAt": {
+      "type": "string",
+      "title": "Created At",
+      "description": "UTC timestamp of the tweet",
+      "template": "2023-01-01T00:00:00.000Z"
+    }
+  }
+}

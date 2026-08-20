@@ -5,6 +5,7 @@
   "version": "0.1",
   "dockerfile": "../Dockerfile",
   "input": "../INPUT_SCHEMA.json",
+  "output": "../apify_output_schema.json",
   "storages": {
     "dataset": "./dataset_schema.json"
   },
