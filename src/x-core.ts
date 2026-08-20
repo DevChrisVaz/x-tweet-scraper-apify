@@ -662,10 +662,22 @@ export class XGraphqlClient {
   }
 
   private async request(operation: OperationName, snapshot: DiscoverySnapshot, variables: JsonRecord, headers: Record<string, string>): Promise<Response> {
-    const url = new URL(`${X_GRAPHQL_BASE_URL}/${snapshot.operations[operation]}/${operation}`);
+    let queryId = snapshot.operations[operation];
+    let features = snapshot.features;
+    let fieldToggles = snapshot.fieldToggles;
+    if (this.session.isAuthenticated()) {
+      const authConfig = AUTHENTICATED_OPERATIONS[operation as keyof typeof AUTHENTICATED_OPERATIONS];
+      if (authConfig !== undefined) {
+        queryId = authConfig.queryId;
+        features = authConfig.features;
+        fieldToggles = authConfig.fieldToggles;
+      }
+    }
+    const baseUrl = this.session.isAuthenticated() ? 'https://x.com/i/api/graphql' : X_GRAPHQL_BASE_URL;
+    const url = new URL(`${baseUrl}/${queryId}/${operation}`);
     url.searchParams.set('variables', JSON.stringify(variables));
-    url.searchParams.set('features', JSON.stringify(snapshot.features));
-    url.searchParams.set('fieldToggles', JSON.stringify(snapshot.fieldToggles));
+    url.searchParams.set('features', JSON.stringify(features));
+    url.searchParams.set('fieldToggles', JSON.stringify(fieldToggles));
     const signal = AbortSignal.timeout(this.requestTimeoutMs);
     try {
       console.error('Sending GraphQL Request with headers:', headers);
