@@ -990,7 +990,7 @@ export function normalizeTweet(raw: unknown, scrapedAt = new Date().toISOString(
       }),
       media: mediaFrom(legacy),
     },
-    source: sourceLabel(legacy.source),
+    source: sourceLabel(tweet.source ?? legacy.source),
     scrapedAt: new Date(scrapedAt).toISOString(),
   };
 }
