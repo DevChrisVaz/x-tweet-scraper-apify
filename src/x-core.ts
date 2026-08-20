@@ -503,9 +503,43 @@ export class GuestSession {
   }
 
   public async refresh(): Promise<void> {
-    if (this.authCookie !== undefined) return;
+    if (this.authCookie !== undefined) {
+      await this.refreshAuthSession();
+      return;
+    }
     this.token = undefined;
     await this.activate();
+  }
+
+  private async refreshAuthSession(): Promise<void> {
+    const authMatch = this.cookies?.match(/auth_token=([a-f0-9]+)/);
+    if (!authMatch) return;
+    
+    try {
+      const response = await this.fetch('https://x.com/', {
+        method: 'GET',
+        headers: {
+          'cookie': `auth_token=${authMatch[1]}`,
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+      });
+      
+      const newCookies = cookieHeader(response);
+      if (newCookies && newCookies.includes('ct0=')) {
+        // Merge new ct0 into existing cookies
+        const newCt0 = newCookies.match(/ct0=([a-f0-9]+)/)?.[1];
+        if (newCt0) {
+          const baseCookies = this.cookies || '';
+          if (baseCookies.includes('ct0=')) {
+            this.cookies = baseCookies.replace(/ct0=[a-f0-9]+/, `ct0=${newCt0}`);
+          } else {
+            this.cookies = `${baseCookies}; ct0=${newCt0}`;
+          }
+        }
+      }
+    } catch {
+      // Ignore refresh failures
+    }
   }
 
   private async activate(): Promise<void> {
@@ -567,7 +601,7 @@ export class XGraphqlClient {
         await this.sleep(this.backoff(transientAttempts));
         continue;
       }
-      if (response.status === 401 && !unauthorizedRetried) {
+      if ((response.status === 401 || response.status === 403) && !unauthorizedRetried) {
         unauthorizedRetried = true;
         await this.session.refresh();
         continue;
