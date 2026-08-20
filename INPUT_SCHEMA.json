@@ -121,6 +121,14 @@
       "description": "Proxy configuration to use.",
       "type": "object",
       "editor": "proxy"
+    },
+    "authCookies": {
+      "title": "Auth Cookies",
+      "description": "Array of X authentication cookies (e.g. 'auth_token=...; ct0=...'). If provided, the scraper will use them instead of Guest Tokens.",
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "editor": "stringList"
     }
   }
 }

@@ -40,6 +40,7 @@ export const ActorInputSchema = z
     sortBy: z.literal('latest').default('latest'),
     maxResults: z.number().int().min(1).max(10_000).default(100),
     proxyConfiguration: ProxyConfigurationSchema.optional(),
+    authCookies: z.array(z.string()).default([]),
   })
   .strict()
   .superRefine((input, context) => {

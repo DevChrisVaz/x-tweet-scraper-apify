@@ -1,7 +1,7 @@
 import type { TweetOutput } from './contracts.js';
 import { gotScraping } from 'got-scraping';
 
-export type OperationName = 'UserByScreenName' | 'UserTweets' | 'TweetResultByRestId';
+export type OperationName = 'UserByScreenName' | 'UserTweets' | 'TweetResultByRestId' | 'TweetDetail';
 export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS';
@@ -127,9 +127,29 @@ const DEFAULT_OPERATIONS: OperationMap = {
   UserByScreenName: 'Gb-d6r0vxPOADdG62OEBpQ',
   UserTweets: 'SXVCYB8XHSS25nzIljNtZA',
   TweetResultByRestId: 'GZsN2Pc4knAoit6pXa4HSA',
+  TweetDetail: 'XMOz5h24KAZ86qKffKTLdQ',
 };
 
 /** Current public guest GraphQL surface, verified as GET with encoded query JSON. */
+
+export const AUTHENTICATED_OPERATIONS = {
+  UserByScreenName: {
+    queryId: "Gb-d6r0vxPOADdG62OEBpQ",
+    features: {"hidden_profile_subscriptions_enabled":true,"profile_label_improvements_pcf_label_in_post_enabled":true,"responsive_web_profile_redirect_enabled":true,"rweb_tipjar_consumption_enabled":false,"verified_phone_label_enabled":false,"subscriptions_verification_info_is_identity_verified_enabled":true,"subscriptions_verification_info_verified_since_enabled":true,"highlights_tweets_tab_ui_enabled":true,"responsive_web_twitter_article_notes_tab_enabled":true,"subscriptions_feature_can_gift_premium":true,"creator_subscriptions_tweet_preview_api_enabled":true,"responsive_web_graphql_timeline_navigation_enabled":true},
+    fieldToggles: {"withPayments":false,"withAuxiliaryUserLabels":true}
+  },
+  UserTweets: {
+    queryId: "SXVCYB8XHSS25nzIljNtZA",
+    features: {"rweb_video_screen_enabled":false,"rweb_cashtags_enabled":true,"profile_label_improvements_pcf_label_in_post_enabled":true,"responsive_web_profile_redirect_enabled":true,"rweb_tipjar_consumption_enabled":false,"verified_phone_label_enabled":false,"creator_subscriptions_tweet_preview_api_enabled":true,"responsive_web_graphql_timeline_navigation_enabled":true,"premium_content_api_read_enabled":false,"communities_web_enable_tweet_community_results_fetch":true,"c9s_tweet_anatomy_moderator_badge_enabled":true,"responsive_web_grok_analyze_button_fetch_trends_enabled":false,"responsive_web_grok_analyze_post_followups_enabled":true,"rweb_cashtags_composer_attachment_enabled":true,"responsive_web_jetfuel_frame":true,"responsive_web_grok_share_attachment_enabled":true,"responsive_web_grok_annotations_enabled":true,"articles_preview_enabled":true,"responsive_web_edit_tweet_api_enabled":true,"rweb_conversational_replies_downvote_enabled":false,"graphql_is_translatable_rweb_tweet_is_translatable_enabled":true,"view_counts_everywhere_api_enabled":true,"longform_notetweets_consumption_enabled":true,"responsive_web_twitter_article_tweet_consumption_enabled":true,"content_disclosure_indicator_enabled":true,"content_disclosure_ai_generated_indicator_enabled":true,"responsive_web_grok_show_grok_translated_post":true,"responsive_web_grok_analysis_button_from_backend":true,"post_ctas_fetch_enabled":false,"freedom_of_speech_not_reach_fetch_enabled":true,"standardized_nudges_misinfo":true,"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled":true,"longform_notetweets_rich_text_read_enabled":true,"longform_notetweets_inline_media_enabled":false,"responsive_web_grok_image_annotation_enabled":true,"responsive_web_grok_imagine_annotation_enabled":true,"responsive_web_grok_community_note_auto_translation_is_enabled":true,"responsive_web_enhance_cards_enabled":false},
+    fieldToggles: {"withArticlePlainText":false}
+  },
+  TweetDetail: {
+    queryId: "XMOz5h24KAZ86qKffKTLdQ",
+    features: {"rweb_video_screen_enabled":false,"rweb_cashtags_enabled":true,"profile_label_improvements_pcf_label_in_post_enabled":true,"responsive_web_profile_redirect_enabled":true,"rweb_tipjar_consumption_enabled":false,"verified_phone_label_enabled":false,"creator_subscriptions_tweet_preview_api_enabled":true,"responsive_web_graphql_timeline_navigation_enabled":true,"premium_content_api_read_enabled":false,"communities_web_enable_tweet_community_results_fetch":true,"c9s_tweet_anatomy_moderator_badge_enabled":true,"responsive_web_grok_analyze_button_fetch_trends_enabled":false,"responsive_web_grok_analyze_post_followups_enabled":true,"rweb_cashtags_composer_attachment_enabled":true,"responsive_web_jetfuel_frame":true,"responsive_web_grok_share_attachment_enabled":true,"responsive_web_grok_annotations_enabled":true,"articles_preview_enabled":true,"responsive_web_edit_tweet_api_enabled":true,"rweb_conversational_replies_downvote_enabled":false,"graphql_is_translatable_rweb_tweet_is_translatable_enabled":true,"view_counts_everywhere_api_enabled":true,"longform_notetweets_consumption_enabled":true,"responsive_web_twitter_article_tweet_consumption_enabled":true,"content_disclosure_indicator_enabled":true,"content_disclosure_ai_generated_indicator_enabled":true,"responsive_web_grok_show_grok_translated_post":true,"responsive_web_grok_analysis_button_from_backend":true,"post_ctas_fetch_enabled":false,"freedom_of_speech_not_reach_fetch_enabled":true,"standardized_nudges_misinfo":true,"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled":true,"longform_notetweets_rich_text_read_enabled":true,"longform_notetweets_inline_media_enabled":false,"responsive_web_grok_image_annotation_enabled":true,"responsive_web_grok_imagine_annotation_enabled":true,"responsive_web_grok_community_note_auto_translation_is_enabled":true,"responsive_web_enhance_cards_enabled":false},
+    fieldToggles: {"withArticleRichContentState":true,"withArticlePlainText":false,"withArticleSummaryText":true,"withArticleVoiceOver":true,"withGrokAnalyze":false,"withDisallowedReplyControls":false}
+  }
+};
+
 export const X_GRAPHQL_BASE_URL = 'https://api.x.com/graphql';
 
 function asRecord(value: unknown): JsonRecord | undefined {
@@ -449,26 +469,41 @@ export class GuestSession {
   private readonly bearer: string;
   private token: string | undefined;
   private cookies: string | undefined;
+  private readonly authCookie: string | undefined;
 
-  public constructor(options: { fetch?: FetchLike; bearer: string; proxyUrl?: string }) {
+  public constructor(options: { fetch?: FetchLike; bearer: string; proxyUrl?: string; authCookie?: string }) {
     this.fetch = options.fetch ?? (options.proxyUrl === undefined ? fetch : createStickyProxyFetch(options.proxyUrl));
     this.bearer = options.bearer;
     this.proxyUrl = options.proxyUrl;
+    this.authCookie = options.authCookie;
+    if (this.authCookie !== undefined) {
+      this.cookies = this.authCookie;
+    }
+  }
+
+  public isAuthenticated(): boolean {
+    return this.authCookie !== undefined;
   }
 
   public async headers(): Promise<Record<string, string>> {
-    if (this.token === undefined) await this.activate();
+    if (this.authCookie === undefined && this.token === undefined) await this.activate();
     const headers: Record<string, string> = {
       authorization: `Bearer ${this.bearer}`,
-      'x-guest-token': this.token ?? '',
       'x-twitter-active-user': 'yes',
       'x-twitter-client-language': 'en',
     };
-    if (this.cookies !== undefined) headers.cookie = this.cookies;
+    if (this.token !== undefined) headers['x-guest-token'] = this.token;
+    if (this.cookies !== undefined) {
+      headers.cookie = this.cookies;
+      const ct0Match = this.cookies.match(/(?:^|;\s*)ct0=([^;]+)/);
+      if (ct0Match !== null && ct0Match[1] !== undefined) headers['x-csrf-token'] = ct0Match[1];
+      headers['x-twitter-auth-type'] = 'OAuth2Session';
+    }
     return headers;
   }
 
   public async refresh(): Promise<void> {
+    if (this.authCookie !== undefined) return;
     this.token = undefined;
     await this.activate();
   }
@@ -601,6 +636,21 @@ export class XGraphqlClient {
   }
 
   public async tweetById(tweetId: string): Promise<JsonRecord> {
+    if (this.session.isAuthenticated()) {
+      const data = await this.call('TweetDetail', { focalTweetId: tweetId, referrer: 'home', with_rux_injections: false, rankingMode: 'Relevance', includePromotedContent: true, withCommunity: true, withQuickPromoteEligibilityTweetFields: true, withBirdwatchNotes: true, withVoice: true });
+      const threaded = asRecord(data.threaded_conversation_with_injections_v2);
+      const instructions = Array.isArray(threaded?.instructions) ? threaded.instructions : [];
+      let result = undefined;
+      for (const instruction of instructions) {
+        if (instruction.type === 'TimelineAddEntries') {
+          const entry = instruction.entries?.find((e: any) => e.entryId === `tweet-${tweetId}`);
+          if (entry) result = entry.itemContent?.tweet_results?.result;
+        }
+      }
+      if (result === undefined) throw new GraphqlShapeError('TweetDetail response did not contain the requested tweet');
+      return result;
+    }
+
     const data = await this.call('TweetResultByRestId', { tweetId, withCommunity: false, includePromotedContent: false });
     const result = asRecord(asRecord(data.tweetResult)?.result);
     if (result === undefined) throw new GraphqlShapeError('TweetResultByRestId response did not contain tweetResult.result');
@@ -618,7 +668,14 @@ export class XGraphqlClient {
     url.searchParams.set('fieldToggles', JSON.stringify(snapshot.fieldToggles));
     const signal = AbortSignal.timeout(this.requestTimeoutMs);
     try {
-      return await this.fetcher(url, { method: 'GET', headers: { ...headers, accept: 'application/json' }, signal });
+      console.error('Sending GraphQL Request with headers:', headers);
+      const response = await this.fetcher(url, { method: 'GET', headers: { ...headers, accept: 'application/json' }, signal });
+      if (response.status === 422) {
+        const text = await response.text();
+        console.error('X GraphQL 422 Body:', text);
+        return new Response(text, { status: 422, headers: response.headers });
+      }
+      return response;
     } catch (error) {
       if (signal.aborted) throw new RequestTimeoutError();
       throw error;

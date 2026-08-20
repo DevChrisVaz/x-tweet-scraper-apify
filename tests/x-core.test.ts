@@ -19,6 +19,7 @@ const operations = {
   UserByScreenName: 'Gb-d6r0vxPOADdG62OEBpQ',
   UserTweets: 'SXVCYB8XHSS25nzIljNtZA',
   TweetResultByRestId: 'GZsN2Pc4knAoit6pXa4HSA',
+  TweetDetail: 'XMOz5h24KAZ86qKffKTLdQ',
 };
 
 function response(status: number, body: unknown, headers: Record<string, string> = {}): Response {
@@ -81,7 +82,7 @@ describe('operation discovery and caching', () => {
     const discovered = await registry.get();
 
     expect(discovered.bearer).toBe('AAAAAAAAAAAAANRILgAAAAAAbearer-token');
-    expect(discovered.operations).toEqual({ UserByScreenName: 'new-user', UserTweets: 'new-timeline', TweetResultByRestId: 'new-tweet' });
+    expect(discovered.operations).toEqual({ UserByScreenName: 'new-user', UserTweets: 'new-timeline', TweetResultByRestId: 'new-tweet', TweetDetail: 'XMOz5h24KAZ86qKffKTLdQ' });
     await registry.get();
     expect(calls).toHaveLength(3);
   });
@@ -108,7 +109,7 @@ describe('operation discovery and caching', () => {
       bearer: 'AAAAAAAAAAAAANRILgAAAAAAbearer-token',
       buildKey: 'web-2026',
       bootstrapOperations: ['TweetResultByRestId'],
-      operations: { UserByScreenName: 'current-user', UserTweets: 'current-timeline', TweetResultByRestId: operations.TweetResultByRestId },
+      operations: { UserByScreenName: 'current-user', UserTweets: 'current-timeline', TweetResultByRestId: operations.TweetResultByRestId, TweetDetail: operations.TweetDetail },
     });
   });
 
@@ -118,7 +119,7 @@ describe('operation discovery and caching', () => {
       bootstrap: operations,
       fetch: async () => new Response(`{queryId:"fresh-user",${padding},operationName:"UserByScreenName"}{operationName:"UserTweets",queryId:"fresh-timeline"}{queryId:"fresh-tweet",operationName:"TweetResultByRestId"}`, { status: 200 }),
     });
-    await expect(registry.get()).resolves.toMatchObject({ operations: { UserByScreenName: 'fresh-user', UserTweets: 'fresh-timeline', TweetResultByRestId: 'fresh-tweet' } });
+    await expect(registry.get()).resolves.toMatchObject({ operations: { UserByScreenName: 'fresh-user', UserTweets: 'fresh-timeline', TweetResultByRestId: 'fresh-tweet', TweetDetail: 'XMOz5h24KAZ86qKffKTLdQ' } });
   });
 
   it('revalidates the manifest build key and replaces cached IDs, features, and toggles for a new build', async () => {

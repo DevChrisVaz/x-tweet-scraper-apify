@@ -47,10 +47,11 @@ function proxySessionId(value: string): string {
   return value.replace(/[^0-9A-Za-z._~]/g, '_').slice(0, 50);
 }
 
-async function createTargetClient(proxyUrl: string | undefined, registry: OperationRegistry): Promise<XTargetClient> {
+async function createTargetClient(proxyUrl: string | undefined, registry: OperationRegistry, authCookies: string[]): Promise<XTargetClient> {
   const transport = proxyUrl === undefined ? fetch : createStickyProxyFetch(proxyUrl);
   const discovery = await registry.get();
-  const session = new GuestSession({ fetch: transport, bearer: discovery.bearer, ...(proxyUrl === undefined ? {} : { proxyUrl }) });
+  const authCookie = authCookies.length > 0 ? authCookies[Math.floor(Math.random() * authCookies.length)] : undefined;
+  const session = new GuestSession({ fetch: transport, bearer: discovery.bearer, ...(proxyUrl === undefined ? {} : { proxyUrl }), ...(authCookie === undefined ? {} : { authCookie }) });
   return new XGraphqlClient({ registry, session, fetch: transport });
 }
 
@@ -150,7 +151,7 @@ export async function runApifyActorWithRuntime(actor: ActorRuntimeApi): Promise<
     await runCoordinator({
       input,
       subject: identity.subject,
-      sourceFactory: async (target) => createTargetClient(await proxy?.newUrl(proxySessionId(target.key)), registry),
+      sourceFactory: async (target) => createTargetClient(await proxy?.newUrl(proxySessionId(target.key)), registry, input.authCookies),
       entitlement,
       emission: {
         reserveBatch: async (tweetIds) => guard.reserveBatch(tweetIds),
